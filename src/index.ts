@@ -83,7 +83,7 @@ function join(client: Client, requestedName?: string) {
   let player = players.get(client.id);
   if (!player) {
     const name = (requestedName || 'Commander').replace(/[^a-zA-Z0-9 _-]/g, '').trim().slice(0, 18) || 'Commander';
-    player = { id: client.id, name, color: palette[players.size % palette.length]!, gold: 60, score: 0, connected: true, home: -1 };
+    player = { id: client.id, name, color: palette[players.size % palette.length]!, gold: 160, score: 0, connected: true, home: -1 };
     player.arsenal = {atom:0,hydrogen:0,mirv:0}; players.set(client.id, player); spawn(player);
     notify(name + ' entered the frontier.');
   } else { player.connected = true; const updatedName=(requestedName||'').replace(/[^a-zA-Z0-9 _-]/g,'').trim().slice(0,18); if(updatedName)player.name=updatedName; }
@@ -105,7 +105,7 @@ function command(client: Client, raw: string) {
     const homeTile = tiles[player.home];
     const target = homeTile?.owner === player.id ? player.home : owned[0];
     if (target === undefined || target < 0) return;
-    player.gold -= 25; tiles[target]!.troops += 5; notify(player.name + ' recruited 5 troops.'); broadcast(); persistSnapshot(); return;
+    player.gold -= 25; tiles[target]!.troops += 15; notify(player.name + ' recruited 15 troops.'); broadcast(); persistSnapshot(); return;
   }
   if (message.type === 'expand' && Number.isInteger(message.source) && Array.isArray(message.path)) {
     const sourceIndex = message.source as number;
