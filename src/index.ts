@@ -161,17 +161,18 @@ function command(client: Client, raw: string) {
     }
     tile.buildings = Array.isArray(tile.buildings) ? tile.buildings : [];
     const existing = tile.buildings.filter(b => b.type === building);
-    if (existing.length >= rule.max) { send(client.socket,{type:'error',text:'That building is already at its maximum level here.'}); return; }
+    const currentLevel = building === 'city' ? (existing[0]?.level || 0) : existing.length;
+    if (currentLevel >= rule.max) { send(client.socket,{type:'error',text:'That building is already at its maximum level here.'}); return; }
     if (building === 'port' && !neighbors(targetIndex).some(n => tiles[n]!.terrain === 'water')) {
       send(client.socket,{type:'error',text:'Ports must be built on a coastline.'}); return;
     }
     if (building === 'warship' && !tile.buildings.some(b => b.type === 'port')) {
       send(client.socket,{type:'error',text:'Build a Port here before producing Warships.'}); return;
     }
-    const cost = rule.cost * (building === 'city' && existing.length ? existing.length + 1 : 1);
+    const cost = rule.cost * (building === 'city' ? currentLevel + 1 : 1);
     if (player.gold < cost) { send(client.socket,{type:'error',text:'Not enough gold. This build costs ' + cost + '.'}); return; }
     player.gold -= cost;
-    if (building === 'city' && existing.length) existing[0]!.level = Math.min(4, existing[0]!.level + 1);
+    if (building === 'city' && existing.length) existing[0]!.level = currentLevel + 1;
     else tile.buildings.push({type:building,level:1});
     notify(player.name + ' constructed ' + building.replace('_',' ') + '.');
     broadcast(); void persistSnapshot(); return;
