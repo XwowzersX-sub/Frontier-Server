@@ -359,7 +359,7 @@ function command(client: Client, raw: string) {
   if (!client.joined) return;
   const player = players.get(client.id); if (!player) return;
   if(message.type==='chunks'&&Array.isArray(message.chunks)){for(const item of message.chunks.slice(0,36))if(item&&Number.isInteger(item.x)&&Number.isInteger(item.y))sendChunk(client,item.x,item.y);return;}
-  if(message.type==='workers'){player.workerRatio=Math.max(0,Math.min(100,Math.floor(Number(message.ratio)||0)));broadcast();return;}
+  if(message.type==='workers'){const now=Date.now();if(now-client.lastAction<140)return;client.lastAction=now;player.workerRatio=Math.max(0,Math.min(100,Math.floor(Number(message.ratio)||0)));broadcast();return;}
   const now = Date.now(); if (now - client.lastAction < 180) return; client.lastAction = now;
   if (message.type === 'recruit') {
     if (player.gold < 25) { send(client.socket,{type:'error',text:'You need 25 gold to recruit.'}); return; }
@@ -460,8 +460,8 @@ async function boot(){
  else{for(const player of players.values()){player.connected=false;player.spawnPreference=player.spawnPreference||'auto';player.workerRatio=Number.isFinite(player.workerRatio)?player.workerRatio:30;player.territory=player.territory||0;player.troopsTotal=player.troopsTotal||0;player.troopMax=player.troopMax||0;}roundPlayerCount=players.size;}
  setInterval(()=>{
   tick++;
-  const summary=new Map<string,{land:number;troops:number;cityLevels:number;income:number;home:number}>();
-  for(const player of players.values())summary.set(player.id,{land:0,troops:0,cityLevels:0,income:0,home:-1});
+  const summary=new Map<string,{land:number;troops:number;cityLevels:number;farms:number;income:number;home:number}>();
+  for(const player of players.values())summary.set(player.id,{land:0,troops:0,cityLevels:0,farms:0,income:0,home:-1});
   for(let i=0;i<tiles.length;i++){
    const tile=tiles[i]!,stats=tile.owner?summary.get(tile.owner):undefined;if(!stats)continue;
    stats.land++;stats.troops+=tile.troops;if(stats.home<0)stats.home=i;
@@ -470,6 +470,7 @@ async function boot(){
     if(building.type==='factory')stats.income+=3;
     if(building.type==='port')stats.income+=2;
     if(building.type==='market')stats.income+=4;
+    if(building.type==='farm')stats.farms++;
    }
   }
   for(const player of players.values()){
@@ -480,7 +481,7 @@ async function boot(){
    player.gold=Math.min(999999,player.gold+Math.max(1,Math.floor(stats.land*(.2+workers*.035)))+stats.income);
    const home=player.home>=0&&tiles[player.home]?.owner===player.id?player.home:stats.home;
    if(home>=0){
-    const growth=(2+Math.sqrt(stats.troops)*.08)*(1-stats.troops/Math.max(1,maxTroops))*(1-workers/135);
+    const growth=(2+Math.sqrt(stats.troops)*.08)*(1+Math.min(12,stats.farms)*.08)*(1-stats.troops/Math.max(1,maxTroops))*(1-workers/135);
     const add=Math.max(0,Math.floor(growth));
     if(add&&tick%2===0){tiles[home]!.troops+=add;markTile(home);}
    }
