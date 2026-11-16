@@ -16,11 +16,10 @@ const supabase = process.env.SUPABASE_URL && process.env.SUPABASE_SECRET_KEY
   ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SECRET_KEY, { auth: { persistSession: false } }) : null;
 
 const WIDTH = 60, HEIGHT = 40, TICK_MS = 5000;
-type BuildingType = 'city' | 'factory' | 'port' | 'defense_post' | 'missile_silo' | 'sam_launcher' | 'warship';
+type BuildingType = 'city' | 'factory' | 'port' | 'defense_post' | 'market' | 'farm';
 type Building = { type: BuildingType; level: number };
-type WeaponType = 'atom' | 'hydrogen' | 'mirv';
 type Tile = { owner: string | null; terrain: 'plain' | 'forest' | 'mountain' | 'water'; troops: number; buildings: Building[] };
-type Player = { id: string; name: string; color: string; gold: number; score: number; connected: boolean; home: number; arsenal?: Record<WeaponType,number> };
+type Player = { id: string; name: string; color: string; gold: number; score: number; connected: boolean; home: number; };
 type Client = { id: string; socket: WebSocket; joined: boolean; lastAction: number };
 type GameState = { width: number; height: number; tiles: Tile[]; players: Player[]; tick: number };
 const palette = ['#4b9bd1','#db755e','#b18be0','#d2ad4f','#57b78a','#d77eb0','#78aeb5','#c18b62'];
@@ -65,7 +64,7 @@ async function restoreSnapshot() {
     tiles = saved.tiles.map(t => ({ ...t, buildings: Array.isArray(t.buildings) ? t.buildings : [] }));
     tick = Number.isFinite(saved.tick) ? saved.tick : 0;
     players.clear();
-    for (const p of saved.players) if (p && typeof p.id === 'string' && typeof p.name === 'string') players.set(p.id,{...p,connected:false,arsenal:p.arsenal||{atom:0,hydrogen:0,mirv:0}});
+    for (const p of saved.players) if (p && typeof p.id === 'string' && typeof p.name === 'string') players.set(p.id,{...p,connected:false});
     console.log('Restored saved frontier snapshot.');
   } catch (error) { console.error('Could not restore game snapshot:', error); }
 }
@@ -84,7 +83,7 @@ function join(client: Client, requestedName?: string) {
   if (!player) {
     const name = (requestedName || 'Commander').replace(/[^a-zA-Z0-9 _-]/g, '').trim().slice(0, 18) || 'Commander';
     player = { id: client.id, name, color: palette[players.size % palette.length]!, gold: 160, score: 0, connected: true, home: -1 };
-    player.arsenal = {atom:0,hydrogen:0,mirv:0}; players.set(client.id, player); spawn(player);
+    players.set(client.id, player); spawn(player);
     notify(name + ' entered the frontier.');
   } else { player.connected = true; const updatedName=(requestedName||'').replace(/[^a-zA-Z0-9 _-]/g,'').trim().slice(0,18); if(updatedName)player.name=updatedName; }
   send(client.socket, { type: 'welcome', id: client.id });
@@ -152,8 +151,7 @@ function command(client: Client, raw: string) {
     const building = message.building as BuildingType;
     const rules: Record<BuildingType,{cost:number;max:number}> = {
       city:{cost:100,max:4}, factory:{cost:150,max:3}, port:{cost:120,max:1},
-      defense_post:{cost:80,max:1}, missile_silo:{cost:250,max:1},
-      sam_launcher:{cost:160,max:2}, warship:{cost:200,max:6}
+      defense_post:{cost:80,max:1}, market:{cost:130,max:3}, farm:{cost:80,max:3}
     };
     const rule = rules[building];
     if (!rule || tile.owner !== player.id || tile.terrain === 'water' || tile.terrain === 'mountain') {
@@ -166,54 +164,12 @@ function command(client: Client, raw: string) {
     if (building === 'port' && !neighbors(targetIndex).some(n => tiles[n]!.terrain === 'water')) {
       send(client.socket,{type:'error',text:'Ports must be built on a coastline.'}); return;
     }
-    if (building === 'warship' && !tile.buildings.some(b => b.type === 'port')) {
-      send(client.socket,{type:'error',text:'Build a Port here before producing Warships.'}); return;
-    }
     const cost = rule.cost * (building === 'city' ? currentLevel + 1 : 1);
     if (player.gold < cost) { send(client.socket,{type:'error',text:'Not enough gold. This build costs ' + cost + '.'}); return; }
     player.gold -= cost;
     if (building === 'city' && existing.length) existing[0]!.level = currentLevel + 1;
     else tile.buildings.push({type:building,level:1});
     notify(player.name + ' constructed ' + building.replace('_',' ') + '.');
-    broadcast(); void persistSnapshot(); return;
-  }
-  if (message.type === 'weapon' && (message.action === 'buy' || message.action === 'launch') && Number.isInteger(message.tile)) {
-    const weapon = message.weapon as WeaponType;
-    const prices: Record<WeaponType,number> = {atom:250,hydrogen:500,mirv:900};
-    const radii: Record<WeaponType,number> = {atom:0,hydrogen:1,mirv:2};
-    if (!(weapon in prices)) return;
-    const targetIndex = message.tile as number;
-    if (targetIndex < 0 || targetIndex >= tiles.length) return;
-    const arsenal = player.arsenal || (player.arsenal={atom:0,hydrogen:0,mirv:0});
-    if (message.action === 'buy') {
-      const silo = tiles[targetIndex]!;
-      if (silo.owner !== player.id || !(silo.buildings || []).some(b => b.type === 'missile_silo')) {
-        send(client.socket,{type:'error',text:'Choose one of your Missile Silos to arm.'}); return;
-      }
-      const price = prices[weapon];
-      if (player.gold < price) { send(client.socket,{type:'error',text:'Not enough gold to arm this weapon.'}); return; }
-      player.gold -= price; arsenal[weapon]++; notify(player.name + ' armed a ' + weapon.toUpperCase() + '.');
-      broadcast(); void persistSnapshot(); return;
-    }
-    if (arsenal[weapon] < 1) { send(client.socket,{type:'error',text:'You do not have this weapon available.'}); return; }
-    const target = tiles[targetIndex]!;
-    if (target.terrain === 'water' || target.owner === player.id) { send(client.socket,{type:'error',text:'Choose an enemy or neutral land tile.'}); return; }
-    const tx = targetIndex % WIDTH, ty = Math.floor(targetIndex / WIDTH);
-    const interceptor = tiles.some((t,i) => t.owner && t.owner !== player.id && (t.buildings || []).some(b => b.type === 'sam_launcher') && Math.abs(i % WIDTH - tx) + Math.abs(Math.floor(i / WIDTH) - ty) <= 4);
-    arsenal[weapon]--;
-    if (interceptor) { notify(player.name + 's strike was intercepted by an enemy SAM launcher.'); broadcast(); void persistSnapshot(); return; }
-    const radius = radii[weapon];
-    let affected = 0;
-    for (let i=0;i<tiles.length;i++) {
-      const targetTile = tiles[i]!;
-      const distance = Math.abs(i % WIDTH - tx) + Math.abs(Math.floor(i / WIDTH) - ty);
-      if (distance > radius || targetTile.terrain === 'water' || !targetTile.owner || targetTile.owner === player.id) continue;
-      const defender = players.get(targetTile.owner);
-      if (defender) defender.score = Math.max(0,defender.score-1);
-      targetTile.owner = null; targetTile.troops = 0; targetTile.buildings = [];
-      affected++;
-    }
-    notify(player.name + ' used ' + weapon.toUpperCase() + ' and cleared ' + affected + ' hostile tiles.');
     broadcast(); void persistSnapshot(); return;
   }
   if (message.type === 'claim' && Number.isInteger(message.tile)) {
@@ -278,7 +234,7 @@ async function boot() {
     tick++;
     for (const player of players.values()) {
       const land = tiles.filter(t=>t.owner===player.id);
-      const buildingIncome = land.reduce((sum,t) => sum + (t.buildings || []).reduce((n,b) => n + (b.type === 'factory' ? 3 : b.type === 'city' ? b.level * 2 : b.type === 'port' ? 2 : 0),0),0);
+      const buildingIncome = land.reduce((sum,t) => sum + (t.buildings || []).reduce((n,b) => n + (b.type === 'factory' ? 3 : b.type === 'city' ? b.level * 2 : b.type === 'port' ? 2 : b.type === 'market' ? 4 : 0),0),0);
       player.gold = Math.min(9999, player.gold + Math.max(1,Math.floor(land.length/3)) + buildingIncome);
       for (const tile of land) {
         const city = (tile.buildings || []).find(b => b.type === 'city');
