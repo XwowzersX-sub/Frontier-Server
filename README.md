@@ -27,3 +27,8 @@ The server stores the shared map, player scores, gold, and troop counts in `publ
 npm install
 npm run dev
 ```
+
+
+## Troop-based route expansion
+
+The client sends an `expand` command with a source territory, an adjacent-tile route, and a troop percentage. The server validates every step, removes the selected force from the source, resolves each neutral/enemy garrison along the route, updates scores and ownership, and broadcasts/persists the new match state. Expansion no longer consumes gold; gold remains a resource for recruiting.
