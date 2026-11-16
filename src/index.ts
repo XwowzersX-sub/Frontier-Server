@@ -212,60 +212,77 @@ function linePath(from: number, to: number): number[] {
   }
   return path.slice(1);
 }
+function neighbors8(i: number) {
+  const x = i % WIDTH, y = Math.floor(i / WIDTH), out: number[] = [];
+  for (let oy=-1; oy<=1; oy++) for (let ox=-1; ox<=1; ox++) {
+    if (!ox && !oy) continue;
+    const nx=x+ox, ny=y+oy;
+    if (nx>=0 && nx<WIDTH && ny>=0 && ny<HEIGHT) out.push(index(nx,ny));
+  }
+  return out;
+}
 function claim(client: Client, player: Player, message: any) {
   const targetIndex = message.tile as number;
   if (!Number.isInteger(targetIndex) || targetIndex < 0 || targetIndex >= tiles.length) return;
   const target = tiles[targetIndex]!;
   if (target.owner === player.id) { send(client.socket,{type:'error',text:'That territory is already yours.'}); return; }
   if (target.terrain === 'mountain' || target.terrain === 'water') { send(client.socket,{type:'error',text:'Choose a land region.'}); return; }
-  let sourceIndex = Number.isInteger(message.source) ? Number(message.source) : -1;
+  const sourceIndex = Number.isInteger(message.source) ? Number(message.source) : -1;
   if (sourceIndex < 0 || sourceIndex >= tiles.length || tiles[sourceIndex]!.owner !== player.id) {
-    let best = Infinity;
-    sourceIndex = -1;
-    for (let i=0;i<tiles.length;i++) if (tiles[i]!.owner === player.id) {
-      const d = Math.hypot((i%WIDTH)-(targetIndex%WIDTH),Math.floor(i/WIDTH)-Math.floor(targetIndex/WIDTH));
-      if (d < best) { best=d; sourceIndex=i; }
-    }
+    send(client.socket,{type:'error',text:'Select one of your own launch territories first.'}); return;
   }
-  if (sourceIndex < 0) { send(client.socket,{type:'error',text:'Select one of your territories first.'}); return; }
-  const distance = Math.hypot((sourceIndex%WIDTH)-(targetIndex%WIDTH),Math.floor(sourceIndex/WIDTH)-Math.floor(targetIndex/WIDTH));
-  if (distance > 15) { send(client.socket,{type:'error',text:'That frontier is too far away. Select a closer launch territory.'}); return; }
-  const source = tiles[sourceIndex]!;
+  const sx=sourceIndex%WIDTH,sy=Math.floor(sourceIndex/WIDTH),tx=targetIndex%WIDTH,ty=Math.floor(targetIndex/WIDTH);
+  const dx=tx-sx,dy=ty-sy,distance=Math.hypot(dx,dy);
+  if (distance > 15) { send(client.socket,{type:'error',text:'That frontier is too far away. Select a destination within 15 tiles.'}); return; }
+  const dirX=dx/(distance||1),dirY=dy/(distance||1);
   const percent = Math.max(1,Math.min(100,Math.floor(Number(message.percent)||50)));
+  const source = tiles[sourceIndex]!;
   const sent = Math.floor(source.troops * percent / 100);
   if (sent < 1) { send(client.socket,{type:'error',text:'Not enough troops in that territory.'}); return; }
-  const route = linePath(sourceIndex,targetIndex);
   source.troops -= sent;
-  let remaining = sent, captured = 0, lastCaptured = -1;
-  for (const step of route) {
-    const tile = tiles[step]!;
-    if (tile.terrain === 'water' || tile.terrain === 'mountain') break;
-    if (tile.owner === player.id) continue;
-    const defender = Math.ceil(tile.troops * ((tile.buildings || []).some(b=>b.type==='defense_post') ? 2 : 1));
-    if (remaining <= defender) {
-      tile.troops = Math.max(0,defender-remaining);
-      remaining = 0;
-      break;
+  const maxRadius=Math.min(15,Math.max(3,Math.floor(3+Math.sqrt(sent)*.34)));
+  const queue:{index:number;troops:number;depth:number}[]=[{index:sourceIndex,troops:sent,depth:0}];
+  const visited=new Set<number>([sourceIndex]);
+  let captured=0,processed=0,remainingArmy=0;
+  while(queue.length && processed<220) {
+    const wave=queue.shift()!; processed++;
+    if(wave.depth>=maxRadius || wave.troops<3) continue;
+    const candidates=neighbors8(wave.index).filter(next=>{
+      if(visited.has(next)) return false;
+      const tile=tiles[next]!;
+      if(tile.terrain==='water'||tile.terrain==='mountain'||tile.owner===player.id) return false;
+      const rx=(next%WIDTH)-sx,ry=Math.floor(next/WIDTH)-sy,radial=Math.hypot(rx,ry);
+      if(radial>maxRadius||radial<.1) return false;
+      const forward=(rx*dirX+ry*dirY)/(radial||1);
+      return forward>-.08;
+    }).map(next=>{
+      const rx=(next%WIDTH)-sx,ry=Math.floor(next/WIDTH)-sy,radial=Math.hypot(rx,ry);
+      const forward=(rx*dirX+ry*dirY)/(radial||1),lateral=Math.abs(rx*dirY-ry*dirX)/(radial||1);
+      const tile=tiles[next]!;
+      return {next,score:forward*1.7-lateral*.48+(tile.owner?-.08:0)+Math.random()*.23};
+    }).sort((a,b)=>b.score-a.score);
+    if(!candidates.length){remainingArmy+=wave.troops;continue;}
+    const branchCount=Math.min(wave.depth<2?3:2,candidates.length,Math.max(1,Math.floor(wave.troops/4)));
+    const chosen=candidates.slice(0,branchCount),share=Math.floor(wave.troops/branchCount);
+    for(const option of chosen) {
+      const next=option.next; visited.add(next);
+      const tile=tiles[next]!;
+      const defender=Math.ceil(tile.troops*((tile.buildings||[]).some(b=>b.type==='defense_post')?2:1));
+      const attrition=Math.max(1,Math.ceil(share*(.025+wave.depth*.004)));
+      const effective=share-attrition;
+      if(effective<=defender){tile.troops=Math.max(0,defender-effective);continue;}
+      if(tile.owner){const previous=players.get(tile.owner);if(previous)previous.score=Math.max(0,previous.score-1);}
+      const survivors=effective-defender-1;
+      tile.owner=player.id;tile.troops=survivors;player.score++;captured++;
+      if(survivors>=3)queue.push({index:next,troops:survivors,depth:wave.depth+1});
+      else remainingArmy+=survivors;
     }
-    if (tile.owner) {
-      const previous = players.get(tile.owner);
-      if (previous) previous.score = Math.max(0,previous.score-1);
-    }
-    remaining -= defender + 1;
-    tile.owner = player.id;
-    tile.troops = 0;
-    player.score++;
-    captured++;
-    lastCaptured = step;
   }
-  if (!captured) {
-    send(client.socket,{type:'notice',text:'The expansion front was stopped. Troops were lost; choose another direction or send a larger force.'});
-    broadcast();
-    void persistSnapshot();
-    return;
+  if(!captured) {
+    notify('🛡 ' + player.name + '\'s expansion wave ran out of strength before capturing land.');
+    broadcast(); void persistSnapshot(); return;
   }
-  if (lastCaptured >= 0) tiles[lastCaptured]!.troops += remaining;
-  notify('✦ ' + player.name + ' expanded the frontier by ' + captured + ' tile' + (captured===1?'':'s') + '.');
+  notify('⚔ ' + player.name + ' spread an army outward and captured ' + captured + ' territory tiles. Troops diminished along the way.');
   broadcast();
   void persistSnapshot();
   checkVictory();
