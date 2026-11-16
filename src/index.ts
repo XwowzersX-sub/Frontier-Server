@@ -201,7 +201,7 @@ function linePath(from: number, to: number): number[] {
   const dy = -Math.abs(y1-y0), sy = y0 < y1 ? 1 : -1;
   let err = dx + dy, steps = 0;
   const path: number[] = [];
-  while (steps < 15) {
+  while (steps < 16) {
     path.push(index(x0,y0));
     if (x0 === x1 && y0 === y1) break;
     const e2 = 2 * err;
@@ -266,7 +266,7 @@ function claim(client: Client, player: Player, message: any) {
   checkVictory();
 }
 function checkVictory() {
-  if (finishing || players.size < 2) return;
+  if (finishing || players.size < 1) return;
   const playable = tiles.filter(t=>t.terrain!=='water' && t.terrain!=='mountain').length;
   if (!playable) return;
   const land = new Map<string,number>();
