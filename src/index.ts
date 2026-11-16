@@ -15,19 +15,24 @@ const port = Number(process.env.PORT || 10000);
 const supabase = process.env.SUPABASE_URL && process.env.SUPABASE_SECRET_KEY
   ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SECRET_KEY, { auth: { persistSession: false } }) : null;
 
-const WIDTH = 180, HEIGHT = 110, TICK_MS = 4500, MAX_PLAYERS = 50, WIN_LAND = 0.8;
+const WIDTH = 1000, HEIGHT = 1000, TICK_MS = 4500, MAX_PLAYERS = 50, WIN_LAND = 0.8, CHUNK_SIZE = 64;
 const MAPS = ['Continents','Island Chain','Pangaea','Highlands','Twin Worlds','Inland Sea','Atolls','Supercontinent','Fractal Wilds','Earthlike'];
 type BuildingType = 'city' | 'factory' | 'port' | 'defense_post' | 'market' | 'farm';
 type Building = { type: BuildingType; level: number };
 type Tile = { owner: string | null; terrain: 'plain' | 'forest' | 'mountain' | 'water'; troops: number; buildings: Building[] };
-type Player = { id: string; name: string; color: string; gold: number; score: number; connected: boolean; home: number; spawnPreference: string };
-type Client = { id: string; socket: WebSocket; joined: boolean; lastAction: number };
-type GameState = { width: number; height: number; tiles: Tile[]; players: Player[]; tick: number; round: number; mapName: string; capacity: number };
+type Player = { id: string; name: string; color: string; gold: number; score: number; connected: boolean; home: number; spawnPreference: string; workerRatio?: number };
+type Client = { id: string; socket: WebSocket; joined: boolean; lastAction: number; loadedChunks: Set<string> };
+type Ship = { id: string; owner: string; from: number; to: number; path: number[]; step: number; kind: 'colony'|'trade'; destinationOwner?: string };
+type GameState = { width: number; height: number; players: Player[]; tick: number; round: number; mapName: string; mapSeed: number; playable: number; capacity: number; ships: Array<{id:string;owner:string;x:number;y:number;kind:string}> };
 const players = new Map<string, Player>();
 const clients = new Map<WebSocket, Client>();
-let tick = 0, round = 1, mapName = 'Continents', roundPlayerCount = 0, finishing = false;
-let tiles: Tile[] = [];
-let nextMatchTimer: ReturnType<typeof setTimeout> | null = null;
+let tick=0,round=1,mapName='Continents',mapSeed=1,roundPlayerCount=0,finishing=false,playableTiles=0;
+let tiles:Tile[]=[],ships:Ship[]=[];
+const dirtyTiles=new Set<number>(),persistentTiles=new Set<number>();
+let nextMatchTimer:ReturnType<typeof setTimeout>|null=null;
+function markTile(i:number){if(i>=0&&i<tiles.length){dirtyTiles.add(i);persistentTiles.add(i);}}
+function chunkKey(cx:number,cy:number){return cx+':'+cy;}
+function chunkKeyForTile(i:number){return chunkKey(Math.floor((i%WIDTH)/CHUNK_SIZE),Math.floor(Math.floor(i/WIDTH)/CHUNK_SIZE));}
 
 function index(x: number, y: number) { return y * WIDTH + x; }
 function colorFor(slot: number) { return 'hsl(' + ((slot * 137.508 + 195) % 360).toFixed(1) + ' 66% 58%)'; }
@@ -106,13 +111,17 @@ function spawn(player: Player, used: Set<number>) {
     if (tile.terrain === 'water' || tile.terrain === 'mountain') tile.terrain = 'plain';
   }
   used.add(chosen);
-  player.home = chosen;
-  tiles[chosen] = { owner: player.id, terrain: 'plain', troops: 36, buildings: [] };
+  player.home=chosen;
+  tiles[chosen]={owner:player.id,terrain:'plain',troops:36,buildings:[]};
+  for(let dy=-3;dy<=3;dy++)for(let dx=-3;dx<=3;dx++){const x=sx+dx,y=sy+dy;if(x>=0&&x<WIDTH&&y>=0&&y<HEIGHT)markTile(index(x,y));}
 }
 function freshWorld(randomMap = true) {
-  mapName = randomMap ? MAPS[Math.floor(Math.random() * MAPS.length)]! : mapName;
-  tiles = makeMap(mapName, Math.random() * 1000);
-  tick = 0;
+  mapName=randomMap?MAPS[Math.floor(Math.random()*MAPS.length)]!:mapName;
+  mapSeed=Math.floor(Math.random()*1_000_000_000);
+  tiles=makeMap(mapName,mapSeed);
+  playableTiles=tiles.reduce((sum,t)=>sum+(t.terrain==='water'||t.terrain==='mountain'?0:1),0);
+  dirtyTiles.clear();persistentTiles.clear();ships=[];
+  tick=0;
   const connected = [...players.values()].filter(p => p.connected).slice(0, MAX_PLAYERS);
   players.clear();
   connected.forEach((p,slot) => {
@@ -125,39 +134,48 @@ function freshWorld(randomMap = true) {
   finishing = false;
 }
 function state(): GameState {
-  return { width: WIDTH, height: HEIGHT, tiles, players: [...players.values()].map(p => ({...p})), tick, round, mapName, capacity: MAX_PLAYERS };
+  return {width:WIDTH,height:HEIGHT,players:[...players.values()].map(p=>({...p})),tick,round,mapName,mapSeed,playable:playableTiles,capacity:MAX_PLAYERS,ships:ships.map(s=>{const i=s.path[Math.min(s.step,s.path.length-1)]??s.from;return{id:s.id,owner:s.owner,x:i%WIDTH,y:Math.floor(i/WIDTH),kind:s.kind};})};
 }
 let saveQueue = Promise.resolve();
 function persistSnapshot(): Promise<void> {
   if (!supabase) return Promise.resolve();
-  const snapshot = { id:'main', state:state(), updated_at:new Date().toISOString() };
+  const compactState={width:WIDTH,height:HEIGHT,tick,round,mapName,mapSeed,players:[...players.values()].map(p=>({...p,connected:false})),changes:[...persistentTiles].map(i=>[i,tiles[i]])};
+  const snapshot={id:'main',state:compactState,updated_at:new Date().toISOString()};
   saveQueue = saveQueue.then(async () => {
     const { error } = await supabase!.from('game_snapshots').upsert(snapshot);
     if (error) console.error('Could not save game snapshot:', error.message);
   }).catch(error => console.error('Snapshot save failed:', error));
   return saveQueue;
 }
-async function restoreSnapshot() {
-  if (!supabase) { console.warn('Supabase server key not configured; match state will be temporary.'); return; }
-  try {
-    const { data, error } = await supabase.from('game_snapshots').select('state').eq('id','main').maybeSingle();
-    if (error) throw error;
-    const saved = data?.state as GameState | undefined;
-    if (!saved || saved.width !== WIDTH || saved.height !== HEIGHT || !Array.isArray(saved.tiles) || saved.tiles.length !== WIDTH * HEIGHT || !Array.isArray(saved.players)) return;
-    tiles = saved.tiles.map(t => ({ ...t, buildings: (Array.isArray(t.buildings) ? t.buildings : []).filter(b => ['city','factory','port','defense_post','market','farm'].includes(b.type)) }));
-    tick = Number.isFinite(saved.tick) ? saved.tick : 0;
-    round = Math.max(1,Number(saved.round) || 1);
-    mapName = MAPS.includes(saved.mapName) ? saved.mapName : 'Continents';
-    players.clear();
-    for (const p of saved.players) if (p && typeof p.id === 'string' && typeof p.name === 'string') players.set(p.id,{...p,connected:false,spawnPreference:p.spawnPreference || 'auto'});
-    roundPlayerCount = players.size;
-    console.log('Restored saved frontier match.');
-  } catch (error) { console.error('Could not restore saved frontier match:', error); }
+async function restoreSnapshot(){
+ if(!supabase){console.warn('Supabase server key not configured; match state will be temporary.');return;}
+ try{
+  const {data,error}=await supabase.from('game_snapshots').select('state').eq('id','main').maybeSingle();if(error)throw error;
+  const saved=data?.state as any;
+  if(!saved||saved.width!==WIDTH||saved.height!==HEIGHT||!Array.isArray(saved.players)||!Array.isArray(saved.changes)||!Number.isFinite(saved.mapSeed))return;
+  tick=Number.isFinite(saved.tick)?saved.tick:0;round=Math.max(1,Number(saved.round)||1);mapName=MAPS.includes(saved.mapName)?saved.mapName:'Continents';mapSeed=Number(saved.mapSeed);
+  tiles=makeMap(mapName,mapSeed);playableTiles=tiles.reduce((sum,t)=>sum+(t.terrain==='water'||t.terrain==='mountain'?0:1),0);persistentTiles.clear();dirtyTiles.clear();
+  for(const entry of saved.changes){if(!Array.isArray(entry)||!Number.isInteger(entry[0])||entry[0]<0||entry[0]>=tiles.length||!entry[1])continue;const t=entry[1] as Tile;if(!['plain','forest','mountain','water'].includes(t.terrain)||(t.owner!==null&&typeof t.owner!=='string'))continue;tiles[entry[0]]={owner:t.owner,terrain:t.terrain,troops:Math.max(0,Number(t.troops)||0),buildings:Array.isArray(t.buildings)?t.buildings.filter(b=>['city','factory','port','defense_post','market','farm'].includes(b.type)):[]};persistentTiles.add(entry[0]);}
+  players.clear();for(const p of saved.players)if(p&&typeof p.id==='string'&&typeof p.name==='string')players.set(p.id,{...p,connected:false,spawnPreference:p.spawnPreference||'auto',workerRatio:Number.isFinite(p.workerRatio)?p.workerRatio:30});
+  roundPlayerCount=players.size;ships=[];console.log('Restored compact 1000x1000 frontier snapshot.');
+ }catch(error){console.error('Could not restore saved frontier snapshot:',error);}
 }
 function send(ws: WebSocket, packet: unknown) { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(packet)); }
-function broadcast() {
-  const packet = JSON.stringify({ type: 'state', state: state() });
-  for (const ws of clients.keys()) if (ws.readyState === WebSocket.OPEN) ws.send(packet);
+function sendChunk(client:Client,cx:number,cy:number){
+ const startX=cx*CHUNK_SIZE,startY=cy*CHUNK_SIZE;if(startX<0||startY<0||startX>=WIDTH||startY>=HEIGHT)return;
+ const width=Math.min(CHUNK_SIZE,WIDTH-startX),height=Math.min(CHUNK_SIZE,HEIGHT-startY),items:Array<{i:number;tile:Tile}>=[];
+ for(let y=0;y<height;y++)for(let x=0;x<width;x++){const i=index(startX+x,startY+y);items.push({i,tile:tiles[i]!});}
+ client.loadedChunks.add(chunkKey(cx,cy));send(client.socket,{type:'chunk',cx,cy,items});
+}
+function broadcast(){
+ const base=state();
+ for(const client of clients.values()){
+  if(!client.joined||client.socket.readyState!==WebSocket.OPEN)continue;
+  const updates:Array<[number,Tile]>=[];
+  for(const i of dirtyTiles)if(client.loadedChunks.has(chunkKeyForTile(i)))updates.push([i,tiles[i]!]);
+  send(client.socket,{type:'state',state:{...base,updates}});
+ }
+ dirtyTiles.clear();
 }
 function notify(text: string) {
   const packet = JSON.stringify({ type: 'notice', text });
@@ -178,7 +196,7 @@ function join(client: Client, requestedName?: string, requestedPreference?: stri
   const preference = ['northwest','north','northeast','west','center','east','southwest','south','southeast'].includes(requestedPreference || '') ? requestedPreference! : 'auto';
   if (!player) {
     const name = (requestedName || 'Commander').replace(/[^a-zA-Z0-9 _-]/g, '').trim().slice(0, 18) || 'Commander';
-    player = { id: client.id, name, color: colorFor(players.size), gold: 160, score: 0, connected: true, home: -1, spawnPreference: preference };
+    player = { id: client.id, name, color: colorFor(players.size), gold: 160, score: 0, connected: true, home: -1, spawnPreference: preference, workerRatio:30 };
     players.set(client.id, player);
     roundPlayerCount = Math.max(roundPlayerCount, players.size);
     const used = new Set([...players.values()].filter(p=>p.id!==player!.id).map(p=>p.home).filter(h=>h>=0));
@@ -319,13 +337,15 @@ function command(client: Client, raw: string) {
   if (message.type === 'join') { join(client, typeof message.name === 'string' ? message.name : undefined, typeof message.spawnPreference === 'string' ? message.spawnPreference : undefined); return; }
   if (!client.joined) return;
   const player = players.get(client.id); if (!player) return;
+  if(message.type==='chunks'&&Array.isArray(message.chunks)){for(const item of message.chunks.slice(0,36))if(item&&Number.isInteger(item.x)&&Number.isInteger(item.y))sendChunk(client,item.x,item.y);return;}
+  if(message.type==='workers'){player.workerRatio=Math.max(0,Math.min(100,Math.floor(Number(message.ratio)||0)));broadcast();return;}
   const now = Date.now(); if (now - client.lastAction < 180) return; client.lastAction = now;
   if (message.type === 'recruit') {
     if (player.gold < 25) { send(client.socket,{type:'error',text:'You need 25 gold to recruit.'}); return; }
     const homeTile = tiles[player.home];
     const target = homeTile?.owner === player.id ? player.home : tiles.findIndex(t=>t.owner===player.id);
     if (target === undefined || target < 0) return;
-    player.gold -= 25; tiles[target]!.troops += 15; notify('＋ ' + player.name + ' recruited 15 troops.'); broadcast(); void persistSnapshot(); return;
+    player.gold -= 25; tiles[target]!.troops += 15; markTile(target); notify('＋ ' + player.name + ' recruited 15 troops.'); broadcast(); void persistSnapshot(); return;
   }
   if (message.type === 'chat' && typeof message.text === 'string') {
     const chatText = message.text.split('').map((ch: string) => { const code=ch.charCodeAt(0); return code<32 || code===127 ? ' ' : ch; }).join('').trim().slice(0,80);
@@ -357,6 +377,7 @@ function command(client: Client, raw: string) {
     player.gold -= cost;
     if (building === 'city' && existing.length) existing[0]!.level = currentLevel + 1;
     else tile.buildings.push({type:building,level:1});
+    markTile(targetIndex);
     notify('🏗 ' + player.name + ' constructed ' + building.replace('_',' ') + '.');
     broadcast(); void persistSnapshot(); return;
   }
@@ -378,7 +399,7 @@ http.on('upgrade', async (req,socket,head) => {
     const user = await verify(authProtocol?.slice(5));
     const id = user?.id || 'guest-' + randomUUID();
     wss.handleUpgrade(req,socket,head,ws => {
-      const client: Client = { id, socket:ws, joined:false, lastAction:0 }; clients.set(ws,client);
+      const client: Client = { id, socket:ws, joined:false, lastAction:0, loadedChunks:new Set<string>() }; clients.set(ws,client);
       ws.on('message',data => command(client,data.toString()));
       ws.on('close',() => {
         clients.delete(ws);
