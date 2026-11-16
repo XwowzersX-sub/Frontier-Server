@@ -1,16 +1,24 @@
 # Frontier Server
 
-Express health/wake endpoints and WebSocket player presence.
+Authoritative starter server for Pixel Frontier. Provides a shared 30×20 map, player spawning, passive gold/troop income, expansion, recruitment, a leaderboard endpoint, and WebSocket state broadcasts.
 
-## Deploy on Render
-1. Render → New → Web Service → connect this repository. Render reads `render.yaml`.
-2. Add environment variables:
-   - `SUPABASE_URL` = `https://rkenxijtbmiqcgwhvtgr.supabase.co`
-   - `SUPABASE_SECRET_KEY` = the server-side Supabase secret key (keep private)
-   - `CLIENT_ORIGIN` = your GitHub Pages origin, e.g. `https://xwowzersx-sub.github.io`
-3. Deploy and test `https://YOUR-SERVICE.onrender.com/health`.
-4. Add the full Render URL as `VITE_SERVER_URL` in the client repository's Actions Variables.
+## Render deployment
+Connect this repository as a **Web Service**. Render reads `render.yaml`. Configure:
+- `SUPABASE_URL`: your Supabase project URL
+- `SUPABASE_SECRET_KEY`: server-side Supabase secret key (Render environment only)
+- `CLIENT_ORIGIN`: exact GitHub Pages origin, e.g. `https://xwowzersx-sub.github.io`
 
-Free Render services sleep when idle. The client's `/health` request wakes the service; the first connection may take a minute or more. Active sockets and in-memory player presence reset on restart.
+The client sends the Supabase access token during WebSocket handshake; server validates it with Supabase Auth. Guests can still join with temporary IDs. Never place the secret key in the client.
 
-This is a connection/presence foundation. The client map is currently a visual prototype; authoritative RTS simulation, matchmaking, and gameplay commands remain to be built.
+## Game rules
+- Players spawn with a home tile, 60 gold, and 12 troops.
+- Every 5 seconds, land generates gold and troops slowly replenish.
+- Recruit 5 troops at your home for 25 gold.
+- Select a neighboring non-mountain tile and press Expand. Neutral land costs 4 gold; enemy land costs 8 gold and can be taken only if its garrison is below 4.
+- State is currently held in memory. Render restarts/sleep clear the match; persistent match storage and room matchmaking are future work.
+
+## Local development
+```bash
+npm install
+npm run dev
+```
