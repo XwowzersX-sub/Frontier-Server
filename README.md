@@ -16,6 +16,7 @@ Authoritative multiplayer server for Pixel Frontier. Provides a shared 60×40 wo
 - Every five seconds, owned territory generates gold and troops recover over time.
 - Recruit troops for 25 gold.
 - Click adjacent neutral or rival land to expand. The selected attack ratio determines the troops committed; expansion does not cost gold.
+- Quick chat messages are length-limited, sanitized, and broadcast to connected players.
 - Mountains and water cannot be captured.
 - Build on owned land: City (100 gold), Factory (150), Port (120), Defense Post (80), Market (130), and Farm (80).
 - Ports require a coastline. Cities can be upgraded to level 4 and increase local troop capacity. Factories, Ports, and Markets improve gold income. Farms increase troop recovery. Defense Posts strengthen a tile's garrison.
