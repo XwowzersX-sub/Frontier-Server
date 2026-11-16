@@ -111,7 +111,7 @@ function spawn(player: Player, used: Set<number>) {
     if (tile.terrain === 'water' || tile.terrain === 'mountain') tile.terrain = 'plain';
   }
   used.add(chosen);
-  player.home=chosen;
+  player.home=chosen;player.territory=1;player.troopsTotal=36;player.troopMax=130;
   tiles[chosen]={owner:player.id,terrain:'plain',troops:36,buildings:[]};
   for(let dy=-3;dy<=3;dy++)for(let dx=-3;dx<=3;dx++){const x=sx+dx,y=sy+dy;if(x>=0&&x<WIDTH&&y>=0&&y<HEIGHT)markTile(index(x,y));}
 }
@@ -495,8 +495,9 @@ async function boot(){
      const owner=players.get(ship.owner);if(owner){owner.score++;notify('🏝 '+owner.name+' founded a new island settlement.');}
     }else if(ship.kind==='trade'){
      const from=players.get(ship.owner),to=ship.destinationOwner?players.get(ship.destinationOwner):from;
-     if(from)from.gold=Math.min(999999,from.gold+40);
-     if(to&&to.id!==from?.id)to.gold=Math.min(999999,to.gold+40);
+     const payout=Math.min(250,Math.max(20,Math.floor(ship.path.length*.3)));
+     if(from)from.gold=Math.min(999999,from.gold+payout);
+     if(to&&to.id!==from?.id)to.gold=Math.min(999999,to.gold+payout);
     }
     ships.splice(i,1);
    }
