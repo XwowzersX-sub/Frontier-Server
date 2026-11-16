@@ -129,7 +129,7 @@ function command(client: Client, raw: string) {
       remaining -= defense + 1;
       if (tiles[lastTile]!.owner === player.id && lastTile !== sourceIndex) tiles[lastTile]!.troops = 0;
       target.owner = player.id;
-      target.troops = remaining;
+      target.troops = 0;
       player.score++;
       captured++;
       lastTile = targetIndex;
