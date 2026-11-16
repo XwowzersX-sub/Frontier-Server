@@ -239,7 +239,8 @@ async function boot() {
       for (const tile of land) {
         const city = (tile.buildings || []).find(b => b.type === 'city');
         const cap = city ? 99 + city.level * 50 : 99;
-        if (tile.troops < cap && tick % 3 === 0) tile.troops++;
+        const farms = (tile.buildings || []).filter(b => b.type === 'farm').length;
+        if (tile.troops < cap && tick % 3 === 0) tile.troops = Math.min(cap,tile.troops + 1 + farms);
       }
     }
     broadcast();
