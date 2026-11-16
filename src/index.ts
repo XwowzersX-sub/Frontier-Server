@@ -107,7 +107,7 @@ function command(client: Client, raw: string) {
     player.gold -= 25; tiles[target]!.troops += 15; notify(player.name + ' recruited 15 troops.'); broadcast(); persistSnapshot(); return;
   }
   if (message.type === 'chat' && typeof message.text === 'string') {
-    const chatText = message.text.replace(/[\\x00-\\x1f\\x7f]/g,' ').trim().slice(0,80);
+    const chatText = Array.from(message.text,ch => { const code=ch.charCodeAt(0); return code<32 || code===127 ? ' ' : ch; }).join('').trim().slice(0,80);
     if (chatText) notify(player.name + ': ' + chatText);
     return;
   }
