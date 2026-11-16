@@ -242,21 +242,26 @@ function claim(client: Client, player: Player, message: any) {
     if (tile.terrain === 'water' || tile.terrain === 'mountain') break;
     if (tile.owner === player.id) continue;
     const defender = Math.ceil(tile.troops * ((tile.buildings || []).some(b=>b.type==='defense_post') ? 2 : 1));
-    if (remaining <= defender) break;
+    if (remaining <= defender) {
+      tile.troops = Math.max(0,defender-remaining);
+      remaining = 0;
+      break;
+    }
     if (tile.owner) {
       const previous = players.get(tile.owner);
       if (previous) previous.score = Math.max(0,previous.score-1);
     }
     remaining -= defender + 1;
     tile.owner = player.id;
-    tile.troops = 1;
+    tile.troops = 0;
     player.score++;
     captured++;
     lastCaptured = step;
   }
   if (!captured) {
-    source.troops += sent;
-    send(client.socket,{type:'notice',text:'The expansion front was stopped. Send more troops or choose another direction.'});
+    send(client.socket,{type:'notice',text:'The expansion front was stopped. Troops were lost; choose another direction or send a larger force.'});
+    broadcast();
+    void persistSnapshot();
     return;
   }
   if (lastCaptured >= 0) tiles[lastCaptured]!.troops += remaining;
