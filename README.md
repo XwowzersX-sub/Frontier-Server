@@ -1,21 +1,26 @@
 # Frontier Server
 
-Authoritative starter server for Pixel Frontier. Provides a shared 30×20 map, player spawning, passive gold/troop income, expansion, recruitment, a leaderboard endpoint, and WebSocket state broadcasts.
+Authoritative starter server for Pixel Frontier. Provides a shared 30×20 world, player spawning, passive gold/troop income, expansion, recruitment, enemy territory captures, a leaderboard endpoint, and WebSocket state broadcasts.
 
-## Render deployment
-Connect this repository as a **Web Service**. Render reads `render.yaml`. Configure:
-- `SUPABASE_URL`: your Supabase project URL
-- `SUPABASE_SECRET_KEY`: server-side Supabase secret key (Render environment only)
-- `CLIENT_ORIGIN`: exact GitHub Pages origin, e.g. `https://xwowzersx-sub.github.io`
-
-The client sends the Supabase access token during WebSocket handshake; server validates it with Supabase Auth. Guests can still join with temporary IDs. Never place the secret key in the client.
+## Deploy on Render
+1. Render → New → Web Service → connect this repository. Render reads `render.yaml`.
+2. Add environment variables:
+   - `SUPABASE_URL` = `https://rkenxijtbmiqcgwhvtgr.supabase.co`
+   - `SUPABASE_SECRET_KEY` = your Supabase server-side secret key (Render environment only)
+   - `CLIENT_ORIGIN` = `https://xwowzersx-sub.github.io`
+3. Deploy and test `https://YOUR-SERVICE.onrender.com/health`.
+4. Add that Render URL as `VITE_SERVER_URL` in the client repository's Actions Variables.
 
 ## Game rules
 - Players spawn with a home tile, 60 gold, and 12 troops.
-- Every 5 seconds, land generates gold and troops slowly replenish.
-- Recruit 5 troops at your home for 25 gold.
-- Select a neighboring non-mountain tile and press Expand. Neutral land costs 4 gold; enemy land costs 8 gold and can be taken only if its garrison is below 4.
-- State is currently held in memory. Render restarts/sleep clear the match; persistent match storage and room matchmaking are future work.
+- Every 5 seconds, land generates gold and every third tick owned tiles gain a troop (up to 99).
+- Recruit 5 troops for 25 gold.
+- Expand into adjacent neutral land for 4 gold.
+- Capture enemy land for 8 gold when the total troops on adjacent owned tiles exceeds the defending garrison. Captures consume 3 troops from the strongest adjacent owned tile.
+- Mountains are blocked.
+
+## Persistence and limitations
+The server stores the shared map, player scores, gold, and troop counts in `public.game_snapshots` in Supabase. Snapshots save on player actions and every 15 seconds. Connected status is reset after restart. The server still has one global match; matchmaking, multiple rooms, full unit movement, and long-term player-stat aggregation are future work.
 
 ## Local development
 ```bash
