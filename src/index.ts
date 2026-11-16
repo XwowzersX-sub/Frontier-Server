@@ -20,7 +20,7 @@ const MAPS = ['Continents','Island Chain','Pangaea','Highlands','Twin Worlds','I
 type BuildingType = 'city' | 'factory' | 'port' | 'defense_post' | 'market' | 'farm';
 type Building = { type: BuildingType; level: number };
 type Tile = { owner: string | null; terrain: 'plain' | 'forest' | 'mountain' | 'water'; troops: number; buildings: Building[] };
-type Player = { id: string; name: string; color: string; gold: number; score: number; connected: boolean; home: number; spawnPreference: string; workerRatio?: number };
+type Player = { id: string; name: string; color: string; gold: number; score: number; connected: boolean; home: number; spawnPreference: string; workerRatio?: number; territory?:number; troopsTotal?:number; troopMax?:number };
 type Client = { id: string; socket: WebSocket; joined: boolean; lastAction: number; loadedChunks: Set<string> };
 type Ship = { id: string; owner: string; from: number; to: number; path: number[]; step: number; kind: 'colony'|'trade'; destinationOwner?: string };
 type GameState = { width: number; height: number; players: Player[]; tick: number; round: number; mapName: string; mapSeed: number; playable: number; capacity: number; ships: Array<{id:string;owner:string;x:number;y:number;kind:string}> };
@@ -125,7 +125,7 @@ function freshWorld(randomMap = true) {
   const connected = [...players.values()].filter(p => p.connected).slice(0, MAX_PLAYERS);
   players.clear();
   connected.forEach((p,slot) => {
-    p.gold = 160; p.score = 0; p.home = -1; p.color = colorFor(slot);
+    p.gold = 160; p.score = 0; p.home = -1; p.color = colorFor(slot);p.territory=0;p.troopsTotal=0;p.troopMax=0;
     players.set(p.id,p);
   });
   const used = new Set<number>();
@@ -165,7 +165,7 @@ function sendChunk(client:Client,cx:number,cy:number){
  const startX=cx*CHUNK_SIZE,startY=cy*CHUNK_SIZE;if(startX<0||startY<0||startX>=WIDTH||startY>=HEIGHT)return;
  const width=Math.min(CHUNK_SIZE,WIDTH-startX),height=Math.min(CHUNK_SIZE,HEIGHT-startY),items:Array<{i:number;tile:Tile}>=[];
  for(let y=0;y<height;y++)for(let x=0;x<width;x++){const i=index(startX+x,startY+y);items.push({i,tile:tiles[i]!});}
- client.loadedChunks.add(chunkKey(cx,cy));send(client.socket,{type:'chunk',cx,cy,items});
+ client.loadedChunks.add(chunkKey(cx,cy));send(client.socket,{type:'chunk',cx,cy,mapSeed,items});
 }
 function broadcast(){
  const base=state();
@@ -196,7 +196,7 @@ function join(client: Client, requestedName?: string, requestedPreference?: stri
   const preference = ['northwest','north','northeast','west','center','east','southwest','south','southeast'].includes(requestedPreference || '') ? requestedPreference! : 'auto';
   if (!player) {
     const name = (requestedName || 'Commander').replace(/[^a-zA-Z0-9 _-]/g, '').trim().slice(0, 18) || 'Commander';
-    player = { id: client.id, name, color: colorFor(players.size), gold: 160, score: 0, connected: true, home: -1, spawnPreference: preference, workerRatio:30 };
+    player = { id: client.id, name, color: colorFor(players.size), gold: 160, score: 0, connected: true, home: -1, spawnPreference: preference, workerRatio:30, territory:0, troopsTotal:0, troopMax:0 };
     players.set(client.id, player);
     roundPlayerCount = Math.max(roundPlayerCount, players.size);
     const used = new Set([...players.values()].filter(p=>p.id!==player!.id).map(p=>p.home).filter(h=>h>=0));
@@ -344,7 +344,7 @@ function checkVictory() {
     nextMatchTimer = setTimeout(() => {
       round++;
       freshWorld(true);
-      for(const client of clients.values())if(client.joined){client.loadedChunks.clear();const p=players.get(client.id);if(p){const cx=Math.floor((p.home%WIDTH)/CHUNK_SIZE),cy=Math.floor(Math.floor(p.home/WIDTH)/CHUNK_SIZE);for(let y=cy-1;y<=cy+1;y++)for(let x=cx-1;x<=cx+1;x++)sendChunk(client,x,y);}}
+      for(const client of clients.values())client.loadedChunks.clear();
       broadcast();
       notify('🌌 ROUND ' + round + ' — ' + mapName + ' is live. ' + players.size + '/' + MAX_PLAYERS + ' commanders.');
       void persistSnapshot();
@@ -457,7 +457,7 @@ http.on('upgrade', async (req,socket,head) => {
 async function boot(){
  await restoreSnapshot();
  if(!tiles.length)freshWorld(true);
- else{for(const player of players.values()){player.connected=false;player.spawnPreference=player.spawnPreference||'auto';player.workerRatio=Number.isFinite(player.workerRatio)?player.workerRatio:30;}roundPlayerCount=players.size;}
+ else{for(const player of players.values()){player.connected=false;player.spawnPreference=player.spawnPreference||'auto';player.workerRatio=Number.isFinite(player.workerRatio)?player.workerRatio:30;player.territory=player.territory||0;player.troopsTotal=player.troopsTotal||0;player.troopMax=player.troopMax||0;}roundPlayerCount=players.size;}
  setInterval(()=>{
   tick++;
   const summary=new Map<string,{land:number;troops:number;cityLevels:number;income:number;home:number}>();
@@ -476,6 +476,7 @@ async function boot(){
    const stats=summary.get(player.id)!;
    const workers=Math.max(0,Math.min(100,Number(player.workerRatio??30)));
    const maxTroops=Math.floor(2*(Math.pow(Math.max(1,stats.land),.6)*15+50)+stats.cityLevels*180);
+   player.territory=stats.land;player.troopsTotal=stats.troops;player.troopMax=maxTroops;
    player.gold=Math.min(999999,player.gold+Math.max(1,Math.floor(stats.land*(.2+workers*.035)))+stats.income);
    const home=player.home>=0&&tiles[player.home]?.owner===player.id?player.home:stats.home;
    if(home>=0){
@@ -501,11 +502,11 @@ async function boot(){
    }
   }
   if(tick%20===0&&ships.filter(s=>s.kind==='trade').length<20){
-   const ports=tiles.map((t,i)=>({t,i})).filter(v=>(v.t.buildings||[]).some(b=>b.type==='port')&&v.t.owner);
+   const ports:number[]=[];for(let i=0;i<tiles.length;i++){const tile=tiles[i]!;if(tile.owner&&(tile.buildings||[]).some(b=>b.type==='port'))ports.push(i);}
    if(ports.length>=2){
-    const a=ports[Math.floor(Math.random()*ports.length)]!;
-    const b=ports.find(v=>v.i!==a.i&&v.t.owner!==a.t.owner)||ports.find(v=>v.i!==a.i);
-    if(b){const path=seaRoute(a.i,b.i);if(path.length>1)ships.push({id:randomUUID(),owner:a.t.owner!,from:a.i,to:b.i,path,step:0,kind:'trade',destinationOwner:b.t.owner||undefined});}
+    const from=ports[Math.floor(Math.random()*ports.length)]!;
+    const to=ports.find(i=>i!==from&&tiles[i]!.owner!==tiles[from]!.owner)||ports.find(i=>i!==from);
+    if(to!==undefined){const path=seaRoute(from,to);if(path.length>1)ships.push({id:randomUUID(),owner:tiles[from]!.owner!,from,to,path,step:0,kind:'trade',destinationOwner:tiles[to]!.owner||undefined});}
    }
   }
   checkVictory();broadcast();if(tick%3===0)void persistSnapshot();
