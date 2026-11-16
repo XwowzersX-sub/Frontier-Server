@@ -180,6 +180,7 @@ function join(client: Client, requestedName?: string, requestedPreference?: stri
     const name = (requestedName || 'Commander').replace(/[^a-zA-Z0-9 _-]/g, '').trim().slice(0, 18) || 'Commander';
     player = { id: client.id, name, color: colorFor(players.size), gold: 160, score: 0, connected: true, home: -1, spawnPreference: preference };
     players.set(client.id, player);
+    roundPlayerCount = Math.max(roundPlayerCount, players.size);
     const used = new Set([...players.values()].filter(p=>p.id!==player!.id).map(p=>p.home).filter(h=>h>=0));
     spawn(player,used);
     notify('✦ ' + name + ' joined the live match (' + players.size + '/' + MAX_PLAYERS + ').');
