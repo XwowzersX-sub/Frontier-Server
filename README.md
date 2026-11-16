@@ -21,7 +21,7 @@ Authoritative multiplayer server for Pixel Frontier. Provides a shared 60×40 wo
 - Ports require a coastline. Cities can be upgraded to level 4 and increase local troop capacity. Factories, Ports, and Markets improve gold income. Farms increase troop recovery. Defense Posts strengthen a tile's garrison.
 
 ## Persistence and limitations
-The server stores the shared map, player scores, gold, troops, terrain, and buildings in `public.game_snapshots` in Supabase. Snapshots save after player actions and periodically. Connected status resets after restart. The server still has one global match; ranked play, teams, separate lobbies, map selection, replays, and advanced diplomacy are not implemented.
+The server stores the shared map, player scores, gold, troops, terrain, and buildings in `public.game_snapshots` in Supabase. Snapshots save after player actions and periodically. Connected status resets after restart. The server still has one global multiplayer map. The client provides local-only FFA, Duos, Trios, and Squads with AI, map presets, difficulty, pause, speed controls, and land-win targets. Ranked multiplayer, multiplayer teams, separate lobbies, public map selection, replays, and diplomacy are not implemented.
 
 ## Local development
 ```bash
