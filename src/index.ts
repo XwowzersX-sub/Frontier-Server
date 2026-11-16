@@ -15,8 +15,10 @@ const port = Number(process.env.PORT || 10000);
 const supabase = process.env.SUPABASE_URL && process.env.SUPABASE_SECRET_KEY
   ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SECRET_KEY, { auth: { persistSession: false } }) : null;
 
-const WIDTH = 30, HEIGHT = 20, TICK_MS = 5000;
-type Tile = { owner: string | null; terrain: 'plain' | 'forest' | 'mountain'; troops: number };
+const WIDTH = 60, HEIGHT = 40, TICK_MS = 5000;
+type BuildingType = 'city' | 'factory' | 'port' | 'defense_post' | 'missile_silo' | 'sam_launcher' | 'warship';
+type Building = { type: BuildingType; level: number };
+type Tile = { owner: string | null; terrain: 'plain' | 'forest' | 'mountain' | 'water'; troops: number; buildings: Building[] };
 type Player = { id: string; name: string; color: string; gold: number; score: number; connected: boolean; home: number };
 type Client = { id: string; socket: WebSocket; joined: boolean; lastAction: number };
 type GameState = { width: number; height: number; tiles: Tile[]; players: Player[]; tick: number };
@@ -27,16 +29,18 @@ let tick = 0;
 let tiles: Tile[] = Array.from({ length: WIDTH * HEIGHT }, (_, i) => {
   const x = i % WIDTH, y = Math.floor(i / WIDTH);
   const n = Math.abs(Math.sin(x * 12.9898 + y * 78.233) * 43758.5453) % 1;
-  return { owner: null, terrain: n > .88 ? 'mountain' : n > .73 ? 'forest' : 'plain', troops: 0 };
+  const coast = x < 2 || y < 2 || x >= WIDTH - 2 || y >= HEIGHT - 2;
+  const lake = Math.abs(x - 43) < 3 && Math.abs(y - 19) < 4;
+  return { owner: null, terrain: coast || lake ? 'water' : n > .88 ? 'mountain' : n > .73 ? 'forest' : 'plain', troops: 0, buildings: [] };
 });
 function idx(x: number, y: number) { return y * WIDTH + x; }
 function neighbors(i: number) { const x = i % WIDTH, y = Math.floor(i / WIDTH); return [[x-1,y],[x+1,y],[x,y-1],[x,y+1]].filter(([a,b]) => a! >= 0 && a! < WIDTH && b! >= 0 && b! < HEIGHT).map(([a,b]) => idx(a!,b!)); }
 function spawn(player: Player) {
-  const starts = [idx(2,2),idx(27,2),idx(2,17),idx(27,17),idx(14,2),idx(14,17),idx(2,10),idx(27,10)];
+  const starts = [idx(5,5),idx(54,5),idx(5,34),idx(54,34),idx(30,5),idx(30,34),idx(5,20),idx(54,20)];
   const home = starts.find(i => !tiles[i]!.owner && neighbors(i).every(n => !tiles[n]!.owner));
   const chosen = home ?? tiles.findIndex(t => !t.owner);
   player.home = chosen;
-  tiles[chosen] = { owner: player.id, terrain: tiles[chosen]!.terrain, troops: 12 };
+  tiles[chosen] = { owner: player.id, terrain: tiles[chosen]!.terrain === 'water' ? 'plain' : tiles[chosen]!.terrain, troops: 20, buildings: [] };
   for (const n of neighbors(chosen)) if (!tiles[n]!.owner && tiles[n]!.terrain !== 'mountain') tiles[n]!.troops = 0;
 }
 function state(): GameState { return { width: WIDTH, height: HEIGHT, tiles, players: [...players.values()].map(p => ({...p})), tick }; }
@@ -57,7 +61,7 @@ async function restoreSnapshot() {
     if (error) throw error;
     const saved = data?.state as GameState | undefined;
     if (!saved || !Array.isArray(saved.tiles) || saved.tiles.length !== WIDTH * HEIGHT || !Array.isArray(saved.players)) return;
-    tiles = saved.tiles;
+    tiles = saved.tiles.map(t => ({ ...t, buildings: Array.isArray(t.buildings) ? t.buildings : [] }));
     tick = Number.isFinite(saved.tick) ? saved.tick : 0;
     players.clear();
     for (const p of saved.players) if (p && typeof p.id === 'string' && typeof p.name === 'string') players.set(p.id,{...p,connected:false});
@@ -140,26 +144,66 @@ function command(client: Client, raw: string) {
     notify(player.name + ' sent troops along a route and captured ' + captured + ' territories.');
     broadcast(); void persistSnapshot(); return;
   }
-  if (message.type === 'claim' && Number.isInteger(message.tile)) {
-    const target = message.tile as number;
-    if (target < 0 || target >= tiles.length) return;
-    const tile = tiles[target]!;
-    if (tile.owner === player.id) { send(client.socket,{type:'error',text:'That tile is already yours.'}); return; }
-    const ownedNeighbor = neighbors(target).some(n => tiles[n]!.owner === player.id);
-    if (!ownedNeighbor) { send(client.socket,{type:'error',text:'Expand from a tile next to your territory.'}); return; }
-    if (tile.terrain === 'mountain') { send(client.socket,{type:'error',text:'Mountains cannot be occupied.'}); return; }
-    const cost = tile.owner ? 8 : 4;
-    if (player.gold < cost) { send(client.socket,{type:'error',text:'Not enough gold.'}); return; }
-    const wasEnemy = Boolean(tile.owner);
-    const friendlyNeighbors = neighbors(target).filter(n => tiles[n]!.owner === player.id);
-    const attackForce = friendlyNeighbors.reduce((sum,n) => sum + tiles[n]!.troops, 0);
-    const attackingTile = friendlyNeighbors.sort((a,b) => tiles[b]!.troops - tiles[a]!.troops)[0];
-    if (wasEnemy && attackForce <= tile.troops) { send(client.socket,{type:'error',text:'Your neighboring troops are not strong enough to capture this tile.'}); return; }
+  if (message.type === 'build' && Number.isInteger(message.tile) && typeof message.building === 'string') {
+    const targetIndex = message.tile as number;
+    if (targetIndex < 0 || targetIndex >= tiles.length) return;
+    const tile = tiles[targetIndex]!;
+    const building = message.building as BuildingType;
+    const rules: Record<BuildingType,{cost:number;max:number}> = {
+      city:{cost:100,max:4}, factory:{cost:150,max:3}, port:{cost:120,max:1},
+      defense_post:{cost:80,max:1}, missile_silo:{cost:250,max:1},
+      sam_launcher:{cost:160,max:2}, warship:{cost:200,max:6}
+    };
+    const rule = rules[building];
+    if (!rule || tile.owner !== player.id || tile.terrain === 'water' || tile.terrain === 'mountain') {
+      send(client.socket,{type:'error',text:'Build on one of your own suitable land territories.'}); return;
+    }
+    tile.buildings = Array.isArray(tile.buildings) ? tile.buildings : [];
+    const existing = tile.buildings.filter(b => b.type === building);
+    if (existing.length >= rule.max) { send(client.socket,{type:'error',text:'That building is already at its maximum level here.'}); return; }
+    if (building === 'port' && !neighbors(targetIndex).some(n => tiles[n]!.terrain === 'water')) {
+      send(client.socket,{type:'error',text:'Ports must be built on a coastline.'}); return;
+    }
+    if (building === 'warship' && !tile.buildings.some(b => b.type === 'port')) {
+      send(client.socket,{type:'error',text:'Build a Port here before producing Warships.'}); return;
+    }
+    const cost = rule.cost * (building === 'city' && existing.length ? existing.length + 1 : 1);
+    if (player.gold < cost) { send(client.socket,{type:'error',text:'Not enough gold. This build costs ' + cost + '.'}); return; }
     player.gold -= cost;
-    if (wasEnemy) { const defender = players.get(tile.owner!); if (defender) defender.score = Math.max(0, defender.score - 1); }
-    if (wasEnemy && attackingTile !== undefined) tiles[attackingTile]!.troops = Math.max(0, tiles[attackingTile]!.troops - 3);
-    tile.owner = player.id; tile.troops = wasEnemy ? 1 : Math.max(1, tile.troops + 2); player.score++;
-    notify(player.name + (cost === 8 ? ' captured enemy land!' : ' expanded their territory.'));
+    if (building === 'city' && existing.length) existing[0]!.level = Math.min(4, existing[0]!.level + 1);
+    else tile.buildings.push({type:building,level:1});
+    notify(player.name + ' constructed ' + building.replace('_',' ') + '.');
+    broadcast(); void persistSnapshot(); return;
+  }
+  if (message.type === 'claim' && Number.isInteger(message.tile)) {
+    const targetIndex = message.tile as number;
+    const percent = Math.max(1,Math.min(100,Math.floor(Number(message.percent)||50)));
+    if (targetIndex < 0 || targetIndex >= tiles.length) return;
+    const tile = tiles[targetIndex]!;
+    if (tile.owner === player.id) { send(client.socket,{type:'error',text:'That territory is already yours.'}); return; }
+    if (tile.terrain === 'mountain' || tile.terrain === 'water') { send(client.socket,{type:'error',text:'That terrain cannot be captured.'}); return; }
+    const friendlyNeighbors = neighbors(targetIndex).filter(n => tiles[n]!.owner === player.id);
+    if (!friendlyNeighbors.length) { send(client.socket,{type:'error',text:'Click land next to your territory to expand.'}); return; }
+    const sourceIndex = friendlyNeighbors.sort((a,b) => tiles[b]!.troops - tiles[a]!.troops)[0]!;
+    const source = tiles[sourceIndex]!;
+    const sent = Math.floor(source.troops * percent / 100);
+    if (sent < 1) { send(client.socket,{type:'error',text:'Not enough troops in the neighboring territory.'}); return; }
+    const hasDefense = (tile.buildings || []).some(b => b.type === 'defense_post');
+    const defense = Math.ceil(tile.troops * (hasDefense ? 2 : 1));
+    source.troops -= sent;
+    if (sent <= defense) {
+      tile.troops = Math.max(0,defense-sent);
+      send(client.socket,{type:'notice',text:'The attack was repelled. Select a larger troop percentage.'});
+      broadcast(); void persistSnapshot(); return;
+    }
+    if (tile.owner) {
+      const defender = players.get(tile.owner);
+      if (defender) defender.score = Math.max(0,defender.score-1);
+    }
+    tile.owner = player.id;
+    tile.troops = Math.max(1,sent-defense-1);
+    player.score++;
+    notify(player.name + ' captured a territory.');
     broadcast(); void persistSnapshot(); return;
   }
   if (message.type === 'ping') send(client.socket,{type:'pong',time:Date.now()});
@@ -193,8 +237,13 @@ async function boot() {
     tick++;
     for (const player of players.values()) {
       const land = tiles.filter(t=>t.owner===player.id);
-      player.gold = Math.min(9999, player.gold + Math.max(1,Math.floor(land.length/3)));
-      for (const tile of land) if (tile.troops < 99 && tick % 3 === 0) tile.troops++;
+      const buildingIncome = land.reduce((sum,t) => sum + (t.buildings || []).reduce((n,b) => n + (b.type === 'factory' ? 3 : b.type === 'city' ? b.level * 2 : b.type === 'port' ? 2 : 0),0),0);
+      player.gold = Math.min(9999, player.gold + Math.max(1,Math.floor(land.length/3)) + buildingIncome);
+      for (const tile of land) {
+        const city = (tile.buildings || []).find(b => b.type === 'city');
+        const cap = city ? 99 + city.level * 50 : 99;
+        if (tile.troops < cap && tick % 3 === 0) tile.troops++;
+      }
     }
     broadcast();
     if (tick % 3 === 0) persistSnapshot();
