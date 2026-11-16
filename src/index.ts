@@ -41,13 +41,14 @@ function spawn(player: Player) {
 }
 function state(): GameState { return { width: WIDTH, height: HEIGHT, tiles, players: [...players.values()].map(p => ({...p})), tick }; }
 let saveQueue = Promise.resolve();
-function persistSnapshot() {
-  if (!supabase) return;
+function persistSnapshot(): Promise<void> {
+  if (!supabase) return Promise.resolve();
   const snapshot = { id:'main', state:{ width:WIDTH, height:HEIGHT, tiles:tiles.map(t=>({...t})), players:[...players.values()].map(p=>({...p,connected:false})), tick }, updated_at:new Date().toISOString() };
   saveQueue = saveQueue.then(async () => {
     const { error } = await supabase!.from('game_snapshots').upsert(snapshot);
     if (error) console.error('Could not save game snapshot:', error.message);
   }).catch(error => console.error('Snapshot save failed:', error));
+  return saveQueue;
 }
 async function restoreSnapshot() {
   if (!supabase) { console.warn('Supabase server key not configured; match state will be temporary.'); return; }
@@ -83,6 +84,7 @@ function join(client: Client, requestedName?: string) {
   } else player.connected = true;
   send(client.socket, { type: 'welcome', id: client.id });
   broadcast();
+  void persistSnapshot();
 }
 function command(client: Client, raw: string) {
   if (raw.length > 2048) return;
@@ -120,7 +122,7 @@ function command(client: Client, raw: string) {
     if (wasEnemy && attackingTile !== undefined) tiles[attackingTile]!.troops = Math.max(0, tiles[attackingTile]!.troops - 3);
     tile.owner = player.id; tile.troops = wasEnemy ? 1 : Math.max(1, tile.troops + 2); player.score++;
     notify(player.name + (cost === 8 ? ' captured enemy land!' : ' expanded their territory.'));
-    broadcast(); return;
+    broadcast(); void persistSnapshot(); return;
   }
   if (message.type === 'ping') send(client.socket,{type:'pong',time:Date.now()});
 }
@@ -159,5 +161,5 @@ async function boot() {
   }, TICK_MS);
   http.listen(port,'0.0.0.0',()=>console.log('Frontier server listening on '+port));
 }
-process.on('SIGTERM', async () => { await saveQueue; if (supabase) await persistSnapshot(); http.close(() => process.exit(0)); });
+process.on('SIGTERM', async () => { await persistSnapshot(); http.close(() => process.exit(0)); });
 void boot();
