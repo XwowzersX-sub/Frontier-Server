@@ -61,7 +61,7 @@ async function restoreSnapshot() {
     if (error) throw error;
     const saved = data?.state as GameState | undefined;
     if (!saved || !Array.isArray(saved.tiles) || saved.tiles.length !== WIDTH * HEIGHT || !Array.isArray(saved.players)) return;
-    tiles = saved.tiles.map(t => ({ ...t, buildings: Array.isArray(t.buildings) ? t.buildings : [] }));
+    tiles = saved.tiles.map(t => ({ ...t, buildings: (Array.isArray(t.buildings) ? t.buildings : []).filter(b => ['city','factory','port','defense_post','market','farm'].includes(b.type)) }));
     tick = Number.isFinite(saved.tick) ? saved.tick : 0;
     players.clear();
     for (const p of saved.players) if (p && typeof p.id === 'string' && typeof p.name === 'string') players.set(p.id,{...p,connected:false});
