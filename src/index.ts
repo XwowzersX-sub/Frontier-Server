@@ -200,7 +200,7 @@ function command(client: Client, raw: string) {
     const tx = targetIndex % WIDTH, ty = Math.floor(targetIndex / WIDTH);
     const interceptor = tiles.some((t,i) => t.owner && t.owner !== player.id && (t.buildings || []).some(b => b.type === 'sam_launcher') && Math.abs(i % WIDTH - tx) + Math.abs(Math.floor(i / WIDTH) - ty) <= 4);
     arsenal[weapon]--;
-    if (interceptor) { notify(player.name + ''s strike was intercepted by an enemy SAM launcher.'); broadcast(); void persistSnapshot(); return; }
+    if (interceptor) { notify(player.name + 's strike was intercepted by an enemy SAM launcher.'); broadcast(); void persistSnapshot(); return; }
     const radius = radii[weapon];
     let affected = 0;
     for (let i=0;i<tiles.length;i++) {
