@@ -10,7 +10,7 @@ const allowedOrigins = (process.env.CLIENT_ORIGIN || '*').split(',').map(v => v.
 app.use(cors({ origin: (origin, callback) => callback(null, !origin || allowedOrigins.includes('*') || allowedOrigins.includes(origin)) }));
 app.use(express.json({ limit: '16kb' }));
 const http = createServer(app);
-const wss = new WebSocketServer({ noServer: true, maxPayload: 8 * 1024, handleProtocols: protocols => protocols.has('frontier') ? 'frontier' : false });
+const wss = new WebSocketServer({ noServer: true, maxPayload: 8 * 1024, perMessageDeflate: { threshold: 1024, serverNoContextTakeover: true, clientNoContextTakeover: true, zlibDeflateOptions: { level: 3 } }, handleProtocols: protocols => protocols.has('frontier') ? 'frontier' : false });
 const port = Number(process.env.PORT || 10000);
 const supabase = process.env.SUPABASE_URL && process.env.SUPABASE_SECRET_KEY
   ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SECRET_KEY, { auth: { persistSession: false } }) : null;
