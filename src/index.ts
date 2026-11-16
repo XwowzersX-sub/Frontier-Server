@@ -81,7 +81,7 @@ function join(client: Client, requestedName?: string) {
     player = { id: client.id, name, color: palette[players.size % palette.length]!, gold: 60, score: 0, connected: true, home: -1 };
     players.set(client.id, player); spawn(player);
     notify(name + ' entered the frontier.');
-  } else player.connected = true;
+  } else { player.connected = true; const updatedName=(requestedName||'').replace(/[^a-zA-Z0-9 _-]/g,'').trim().slice(0,18); if(updatedName)player.name=updatedName; }
   send(client.socket, { type: 'welcome', id: client.id });
   broadcast();
   void persistSnapshot();
@@ -101,6 +101,44 @@ function command(client: Client, raw: string) {
     const target = homeTile?.owner === player.id ? player.home : owned[0];
     if (target === undefined || target < 0) return;
     player.gold -= 25; tiles[target]!.troops += 5; notify(player.name + ' recruited 5 troops.'); broadcast(); persistSnapshot(); return;
+  }
+  if (message.type === 'expand' && Number.isInteger(message.source) && Array.isArray(message.path)) {
+    const sourceIndex = message.source as number;
+    const path = message.path.slice(0,80);
+    const percent = Math.max(1,Math.min(100,Math.floor(Number(message.percent)||50)));
+    if (sourceIndex < 0 || sourceIndex >= tiles.length || !path.length || path.some((v:unknown)=>!Number.isInteger(v)||Number(v)<0||Number(v)>=tiles.length)) return;
+    const source = tiles[sourceIndex]!;
+    if (source.owner !== player.id) { send(client.socket,{type:'error',text:'Choose one of your own territories as the troop source.'}); return; }
+    let previous = sourceIndex;
+    for (const value of path as number[]) {
+      if (!neighbors(previous).includes(value)) { send(client.socket,{type:'error',text:'Your route must follow adjacent tiles.'}); return; }
+      previous = value;
+    }
+    const requested = Math.floor(source.troops * percent / 100);
+    if (requested < 1) { send(client.socket,{type:'error',text:'That territory does not have enough troops to send.'}); return; }
+    source.troops -= requested;
+    let remaining = requested, lastTile = sourceIndex, captured = 0;
+    for (const targetIndex of path as number[]) {
+      const target = tiles[targetIndex]!;
+      if (target.owner === player.id) { lastTile = targetIndex; continue; }
+      if (target.terrain === 'mountain') break;
+      const defender = target.owner ? players.get(target.owner) : undefined;
+      const defense = target.owner ? target.troops : 0;
+      if (remaining <= defense) break;
+      if (defender) defender.score = Math.max(0,defender.score-1);
+      remaining -= defense + 1;
+      if (tiles[lastTile]!.owner === player.id && lastTile !== sourceIndex) tiles[lastTile]!.troops = 0;
+      target.owner = player.id;
+      target.troops = remaining;
+      player.score++;
+      captured++;
+      lastTile = targetIndex;
+      if (remaining <= 0) break;
+    }
+    if (captured === 0) { source.troops += requested; send(client.socket,{type:'error',text:'Your troops could not capture the first tile on that route.'}); return; }
+    tiles[lastTile]!.troops += remaining;
+    notify(player.name + ' sent troops along a route and captured ' + captured + ' territories.');
+    broadcast(); void persistSnapshot(); return;
   }
   if (message.type === 'claim' && Number.isInteger(message.tile)) {
     const target = message.tile as number;
