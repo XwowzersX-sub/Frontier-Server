@@ -106,6 +106,11 @@ function command(client: Client, raw: string) {
     if (target === undefined || target < 0) return;
     player.gold -= 25; tiles[target]!.troops += 15; notify(player.name + ' recruited 15 troops.'); broadcast(); persistSnapshot(); return;
   }
+  if (message.type === 'chat' && typeof message.text === 'string') {
+    const chatText = message.text.replace(/[\\x00-\\x1f\\x7f]/g,' ').trim().slice(0,80);
+    if (chatText) notify(player.name + ': ' + chatText);
+    return;
+  }
   if (message.type === 'build' && Number.isInteger(message.tile) && typeof message.building === 'string') {
     const targetIndex = message.tile as number;
     if (targetIndex < 0 || targetIndex >= tiles.length) return;
