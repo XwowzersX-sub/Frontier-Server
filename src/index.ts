@@ -87,10 +87,15 @@ function command(client: Client, raw: string) {
     if (tile.terrain === 'mountain') { send(client.socket,{type:'error',text:'Mountains cannot be occupied.'}); return; }
     const cost = tile.owner ? 8 : 4;
     if (player.gold < cost) { send(client.socket,{type:'error',text:'Not enough gold.'}); return; }
-    if (tile.owner && tile.troops >= 4) { send(client.socket,{type:'error',text:'Enemy tile is defended. Attack after building up more troops.'}); return; }
+    const wasEnemy = Boolean(tile.owner);
+    const friendlyNeighbors = neighbors(target).filter(n => tiles[n]!.owner === player.id);
+    const attackForce = friendlyNeighbors.reduce((sum,n) => sum + tiles[n]!.troops, 0);
+    const attackingTile = friendlyNeighbors.sort((a,b) => tiles[b]!.troops - tiles[a]!.troops)[0];
+    if (wasEnemy && attackForce <= tile.troops) { send(client.socket,{type:'error',text:'Your neighboring troops are not strong enough to capture this tile.'}); return; }
     player.gold -= cost;
-    if (tile.owner) { const defender = players.get(tile.owner); if (defender) defender.score = Math.max(0, defender.score - 1); }
-    tile.owner = player.id; tile.troops = Math.max(1, tile.troops + 2); player.score++;
+    if (wasEnemy) { const defender = players.get(tile.owner!); if (defender) defender.score = Math.max(0, defender.score - 1); }
+    if (wasEnemy && attackingTile !== undefined) tiles[attackingTile]!.troops = Math.max(0, tiles[attackingTile]!.troops - 3);
+    tile.owner = player.id; tile.troops = wasEnemy ? 1 : Math.max(1, tile.troops + 2); player.score++;
     notify(player.name + (cost === 8 ? ' captured enemy land!' : ' expanded their territory.'));
     broadcast(); return;
   }
