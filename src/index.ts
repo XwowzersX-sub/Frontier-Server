@@ -344,6 +344,7 @@ function checkVictory() {
     nextMatchTimer = setTimeout(() => {
       round++;
       freshWorld(true);
+      for(const client of clients.values())if(client.joined){client.loadedChunks.clear();const p=players.get(client.id);if(p){const cx=Math.floor((p.home%WIDTH)/CHUNK_SIZE),cy=Math.floor(Math.floor(p.home/WIDTH)/CHUNK_SIZE);for(let y=cy-1;y<=cy+1;y++)for(let x=cx-1;x<=cx+1;x++)sendChunk(client,x,y);}}
       broadcast();
       notify('🌌 ROUND ' + round + ' — ' + mapName + ' is live. ' + players.size + '/' + MAX_PLAYERS + ' commanders.');
       void persistSnapshot();
@@ -366,6 +367,21 @@ function command(client: Client, raw: string) {
     const target = homeTile?.owner === player.id ? player.home : tiles.findIndex(t=>t.owner===player.id);
     if (target === undefined || target < 0) return;
     player.gold -= 25; tiles[target]!.troops += 15; markTile(target); notify('＋ ' + player.name + ' recruited 15 troops.'); broadcast(); void persistSnapshot(); return;
+  }
+  if(message.type==='boat'&&Number.isInteger(message.source)&&Number.isInteger(message.target)){
+    const sourceIndex=Number(message.source),targetIndex=Number(message.target);
+    if(sourceIndex<0||sourceIndex>=tiles.length||targetIndex<0||targetIndex>=tiles.length)return;
+    const source=tiles[sourceIndex]!,target=tiles[targetIndex]!;
+    const hasPort=(source.buildings||[]).some(b=>b.type==='port');
+    const coastal=neighbors(sourceIndex).some(n=>tiles[n]!.terrain==='water');
+    const targetCoastal=neighbors(targetIndex).some(n=>tiles[n]!.terrain==='water');
+    if(source.owner!==player.id||!hasPort||!coastal){send(client.socket,{type:'error',text:'Build a Port on your coast before dispatching a settlement ferry.'});return;}
+    if(target.owner!==null||target.terrain==='water'||target.terrain==='mountain'||!targetCoastal){send(client.socket,{type:'error',text:'Ferries can only settle an unclaimed coastal land tile.'});return;}
+    if(player.gold<60){send(client.socket,{type:'error',text:'A settlement ferry costs 60 gold.'});return;}
+    const path=seaRoute(sourceIndex,targetIndex);
+    if(path.length<3){send(client.socket,{type:'error',text:'No open sea route connects those coasts.'});return;}
+    player.gold-=60;ships.push({id:randomUUID(),owner:player.id,from:sourceIndex,to:targetIndex,path,step:0,kind:'colony'});
+    notify('🚢 '+player.name+' dispatched a settlement ferry.');broadcast();void persistSnapshot();return;
   }
   if (message.type === 'chat' && typeof message.text === 'string') {
     const chatText = message.text.split('').map((ch: string) => { const code=ch.charCodeAt(0); return code<32 || code===127 ? ' ' : ch; }).join('').trim().slice(0,80);
@@ -428,7 +444,7 @@ http.on('upgrade', async (req,socket,head) => {
           const player = players.get(id);
           if (player) {
             players.delete(id);
-            for (const tile of tiles) if (tile.owner === id) { tile.owner = null; tile.troops = 0; tile.buildings = []; }
+            for (let i=0;i<tiles.length;i++) if (tiles[i]!.owner===id) { tiles[i]!.owner=null;tiles[i]!.troops=0;tiles[i]!.buildings=[];markTile(i); }
             if (player.connected) notify('↘ ' + player.name + ' left the frontier.');
             checkVictory(); broadcast(); void persistSnapshot();
           }
