@@ -212,6 +212,25 @@ function join(client: Client, requestedName?: string, requestedPreference?: stri
   broadcast();
   void persistSnapshot();
 }
+function seaRoute(from:number,to:number):number[]{
+ const starts=neighbors(from).filter(i=>tiles[i]!.terrain==='water');
+ const goals=new Set(neighbors(to).filter(i=>tiles[i]!.terrain==='water'));
+ if(!starts.length||!goals.size)return [];
+ const previous=new Int32Array(tiles.length);previous.fill(-2);
+ const queue=new Int32Array(tiles.length);let head=0,tail=0,goal=-1;
+ for(const i of starts){previous[i]=-1;queue[tail++]=i;}
+ while(head<tail&&tail<tiles.length){
+  const current=queue[head++];if(goals.has(current)){goal=current;break;}
+  for(const next of neighbors(current)){
+   if(previous[next]!==-2||tiles[next]!.terrain!=='water')continue;
+   previous[next]=current;queue[tail++]=next;
+  }
+ }
+ if(goal<0)return [];
+ const waterPath:number[]=[];let at=goal;
+ while(at>=0){waterPath.push(at);at=previous[at]!;}
+ waterPath.reverse();return [from,...waterPath,to];
+}
 function linePath(from: number, to: number): number[] {
   let x0 = from % WIDTH, y0 = Math.floor(from / WIDTH);
   const x1 = to % WIDTH, y1 = Math.floor(to / WIDTH);
@@ -291,24 +310,25 @@ function claim(client: Client, player: Player, message: any) {
       if(effective<=defender){tile.troops=Math.max(0,defender-effective);continue;}
       if(tile.owner){const previous=players.get(tile.owner);if(previous)previous.score=Math.max(0,previous.score-1);}
       const survivors=effective-defender-1;
-      tile.owner=player.id;tile.troops=survivors;player.score++;captured++;
+      tile.owner=player.id;tile.troops=survivors;player.score++;captured++;markTile(next);
       if(survivors>=3)queue.push({index:next,troops:survivors,depth:wave.depth+1});
       else remainingArmy+=survivors;
     }
   }
   if(!captured) {
+    markTile(sourceIndex);
     notify('🛡 ' + player.name + '\'s expansion wave ran out of strength before capturing land.');
     broadcast(); void persistSnapshot(); return;
   }
+  markTile(sourceIndex);
   notify('⚔ ' + player.name + ' spread an army outward and captured ' + captured + ' territory tiles. Troops diminished along the way.');
   broadcast();
   void persistSnapshot();
   checkVictory();
 }
 function checkVictory() {
-  if (finishing || players.size < 1) return;
-  const playable = tiles.filter(t=>t.terrain!=='water' && t.terrain!=='mountain').length;
-  if (!playable) return;
+  if (finishing || players.size < 1 || !playableTiles) return;
+  const playable = playableTiles;
   const land = new Map<string,number>();
   for (const p of players.values()) land.set(p.id,0);
   for (const t of tiles) if (t.owner && land.has(t.owner)) land.set(t.owner,(land.get(t.owner)||0)+1);
@@ -418,31 +438,63 @@ http.on('upgrade', async (req,socket,head) => {
     });
   } catch { socket.destroy(); }
 });
-async function boot() {
-  await restoreSnapshot();
-  if (!tiles.length) freshWorld(true);
-  else {
-    for (const player of players.values()) { player.connected = false; player.spawnPreference = player.spawnPreference || 'auto'; }
-    roundPlayerCount = players.size;
+async function boot(){
+ await restoreSnapshot();
+ if(!tiles.length)freshWorld(true);
+ else{for(const player of players.values()){player.connected=false;player.spawnPreference=player.spawnPreference||'auto';player.workerRatio=Number.isFinite(player.workerRatio)?player.workerRatio:30;}roundPlayerCount=players.size;}
+ setInterval(()=>{
+  tick++;
+  const summary=new Map<string,{land:number;troops:number;cityLevels:number;income:number;home:number}>();
+  for(const player of players.values())summary.set(player.id,{land:0,troops:0,cityLevels:0,income:0,home:-1});
+  for(let i=0;i<tiles.length;i++){
+   const tile=tiles[i]!,stats=tile.owner?summary.get(tile.owner):undefined;if(!stats)continue;
+   stats.land++;stats.troops+=tile.troops;if(stats.home<0)stats.home=i;
+   for(const building of tile.buildings||[]){
+    if(building.type==='city'){stats.cityLevels+=building.level;stats.income+=building.level*2;}
+    if(building.type==='factory')stats.income+=3;
+    if(building.type==='port')stats.income+=2;
+    if(building.type==='market')stats.income+=4;
+   }
   }
-  setInterval(() => {
-    tick++;
-    for (const player of players.values()) {
-      const land = tiles.filter(t=>t.owner===player.id);
-      const buildingIncome = land.reduce((sum,t) => sum + (t.buildings || []).reduce((n,b) => n + (b.type === 'factory' ? 3 : b.type === 'city' ? b.level * 2 : b.type === 'port' ? 2 : b.type === 'market' ? 4 : 0),0),0);
-      player.gold = Math.min(9999, player.gold + Math.max(1,Math.floor(land.length/3)) + buildingIncome);
-      for (const tile of land) {
-        const city = (tile.buildings || []).find(b => b.type === 'city');
-        const cap = city ? 99 + city.level * 50 : 99;
-        const farms = (tile.buildings || []).filter(b => b.type === 'farm').length;
-        if (tile.troops < cap && tick % 3 === 0) tile.troops = Math.min(cap,tile.troops + 1 + farms);
-      }
+  for(const player of players.values()){
+   const stats=summary.get(player.id)!;
+   const workers=Math.max(0,Math.min(100,Number(player.workerRatio??30)));
+   const maxTroops=Math.floor(2*(Math.pow(Math.max(1,stats.land),.6)*15+50)+stats.cityLevels*180);
+   player.gold=Math.min(999999,player.gold+Math.max(1,Math.floor(stats.land*(.2+workers*.035)))+stats.income);
+   const home=player.home>=0&&tiles[player.home]?.owner===player.id?player.home:stats.home;
+   if(home>=0){
+    const growth=(2+Math.sqrt(stats.troops)*.08)*(1-stats.troops/Math.max(1,maxTroops))*(1-workers/135);
+    const add=Math.max(0,Math.floor(growth));
+    if(add&&tick%2===0){tiles[home]!.troops+=add;markTile(home);}
+   }
+  }
+  // Civilian ferries colonize unclaimed coast; trade ships connect ports and share gold.
+  for(let i=ships.length-1;i>=0;i--){
+   const ship=ships[i]!;ship.step=Math.min(ship.path.length-1,ship.step+8);
+   if(ship.step>=ship.path.length-1){
+    const target=tiles[ship.to]!;
+    if(ship.kind==='colony'&&target.owner===null&&target.terrain!=='water'&&target.terrain!=='mountain'){
+     target.owner=ship.owner;target.troops=1;markTile(ship.to);
+     const owner=players.get(ship.owner);if(owner){owner.score++;notify('🏝 '+owner.name+' founded a new island settlement.');}
+    }else if(ship.kind==='trade'){
+     const from=players.get(ship.owner),to=ship.destinationOwner?players.get(ship.destinationOwner):from;
+     if(from)from.gold=Math.min(999999,from.gold+40);
+     if(to&&to.id!==from?.id)to.gold=Math.min(999999,to.gold+40);
     }
-    checkVictory();
-    broadcast();
-    if (tick % 3 === 0) void persistSnapshot();
-  }, TICK_MS);
-  http.listen(port,'0.0.0.0',()=>console.log('Frontier live-match server listening on '+port));
+    ships.splice(i,1);
+   }
+  }
+  if(tick%20===0&&ships.filter(s=>s.kind==='trade').length<20){
+   const ports=tiles.map((t,i)=>({t,i})).filter(v=>(v.t.buildings||[]).some(b=>b.type==='port')&&v.t.owner);
+   if(ports.length>=2){
+    const a=ports[Math.floor(Math.random()*ports.length)]!;
+    const b=ports.find(v=>v.i!==a.i&&v.t.owner!==a.t.owner)||ports.find(v=>v.i!==a.i);
+    if(b){const path=seaRoute(a.i,b.i);if(path.length>1)ships.push({id:randomUUID(),owner:a.t.owner!,from:a.i,to:b.i,path,step:0,kind:'trade',destinationOwner:b.t.owner||undefined});}
+   }
+  }
+  checkVictory();broadcast();if(tick%3===0)void persistSnapshot();
+ },TICK_MS);
+ http.listen(port,'0.0.0.0',()=>console.log('Frontier 1000x1000 chunked world server listening on '+port));
 }
 process.on('SIGTERM', async () => { if(nextMatchTimer)clearTimeout(nextMatchTimer);await persistSnapshot();http.close(() => process.exit(0)); });
 void boot();
