@@ -10,7 +10,7 @@ const allowedOrigins = (process.env.CLIENT_ORIGIN || '*').split(',').map(v => v.
 app.use(cors({ origin: (origin, callback) => callback(null, !origin || allowedOrigins.includes('*') || allowedOrigins.includes(origin)) }));
 app.use(express.json({ limit: '16kb' }));
 const http = createServer(app);
-const wss = new WebSocketServer({ noServer: true, maxPayload: 8 * 1024 });
+const wss = new WebSocketServer({ noServer: true, maxPayload: 8 * 1024, handleProtocols: protocols => protocols.has('frontier') ? 'frontier' : false });
 const port = Number(process.env.PORT || 10000);
 const supabase = process.env.SUPABASE_URL && process.env.SUPABASE_SECRET_KEY
   ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SECRET_KEY, { auth: { persistSession: false } }) : null;
@@ -133,7 +133,9 @@ http.on('upgrade', async (req,socket,head) => {
   const url = new URL(req.url || '/', 'http://localhost');
   if (url.pathname !== '/ws') { socket.destroy(); return; }
   try {
-    const user = await verify(url.searchParams.get('token') || undefined);
+    const offered = (req.headers['sec-websocket-protocol'] || '').split(',').map(value => value.trim());
+    const authProtocol = offered.find(value => value.startsWith('auth.'));
+    const user = await verify(authProtocol?.slice(5));
     const id = user?.id || 'guest-' + randomUUID();
     wss.handleUpgrade(req,socket,head,ws => {
       const client: Client = { id, socket:ws, joined:false, lastAction:0 }; clients.set(ws,client);
