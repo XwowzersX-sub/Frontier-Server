@@ -24,7 +24,7 @@ const palette = ['#4b9bd1','#db755e','#b18be0','#d2ad4f','#57b78a','#d77eb0','#7
 const players = new Map<string, Player>();
 const clients = new Map<WebSocket, Client>();
 let tick = 0;
-const tiles: Tile[] = Array.from({ length: WIDTH * HEIGHT }, (_, i) => {
+let tiles: Tile[] = Array.from({ length: WIDTH * HEIGHT }, (_, i) => {
   const x = i % WIDTH, y = Math.floor(i / WIDTH);
   const n = Math.abs(Math.sin(x * 12.9898 + y * 78.233) * 43758.5453) % 1;
   return { owner: null, terrain: n > .88 ? 'mountain' : n > .73 ? 'forest' : 'plain', troops: 0 };
@@ -40,6 +40,29 @@ function spawn(player: Player) {
   for (const n of neighbors(chosen)) if (!tiles[n]!.owner && tiles[n]!.terrain !== 'mountain') tiles[n]!.troops = 0;
 }
 function state(): GameState { return { width: WIDTH, height: HEIGHT, tiles, players: [...players.values()].map(p => ({...p})), tick }; }
+let saveQueue = Promise.resolve();
+function persistSnapshot() {
+  if (!supabase) return;
+  const snapshot = { id:'main', state:{ width:WIDTH, height:HEIGHT, tiles:tiles.map(t=>({...t})), players:[...players.values()].map(p=>({...p,connected:false})), tick }, updated_at:new Date().toISOString() };
+  saveQueue = saveQueue.then(async () => {
+    const { error } = await supabase!.from('game_snapshots').upsert(snapshot);
+    if (error) console.error('Could not save game snapshot:', error.message);
+  }).catch(error => console.error('Snapshot save failed:', error));
+}
+async function restoreSnapshot() {
+  if (!supabase) { console.warn('Supabase server key not configured; match state will be temporary.'); return; }
+  try {
+    const { data, error } = await supabase.from('game_snapshots').select('state').eq('id','main').maybeSingle();
+    if (error) throw error;
+    const saved = data?.state as GameState | undefined;
+    if (!saved || !Array.isArray(saved.tiles) || saved.tiles.length !== WIDTH * HEIGHT || !Array.isArray(saved.players)) return;
+    tiles = saved.tiles;
+    tick = Number.isFinite(saved.tick) ? saved.tick : 0;
+    players.clear();
+    for (const p of saved.players) if (p && typeof p.id === 'string' && typeof p.name === 'string') players.set(p.id,{...p,connected:false});
+    console.log('Restored saved frontier snapshot.');
+  } catch (error) { console.error('Could not restore game snapshot:', error); }
+}
 function send(ws: WebSocket, packet: unknown) { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(packet)); }
 function broadcast() { const packet = JSON.stringify({ type: 'state', state: state() }); for (const ws of clients.keys()) if (ws.readyState === WebSocket.OPEN) ws.send(packet); }
 function notify(text: string) { const packet = JSON.stringify({ type: 'notice', text }); for (const ws of clients.keys()) send(ws, packet); }
@@ -75,7 +98,7 @@ function command(client: Client, raw: string) {
     const homeTile = tiles[player.home];
     const target = homeTile?.owner === player.id ? player.home : owned[0];
     if (target === undefined || target < 0) return;
-    player.gold -= 25; tiles[target]!.troops += 5; notify(player.name + ' recruited 5 troops.'); broadcast(); return;
+    player.gold -= 25; tiles[target]!.troops += 5; notify(player.name + ' recruited 5 troops.'); broadcast(); persistSnapshot(); return;
   }
   if (message.type === 'claim' && Number.isInteger(message.tile)) {
     const target = message.tile as number;
@@ -122,13 +145,19 @@ http.on('upgrade', async (req,socket,head) => {
     });
   } catch { socket.destroy(); }
 });
-setInterval(() => {
-  tick++;
-  for (const player of players.values()) {
-    const land = tiles.filter(t=>t.owner===player.id);
-    player.gold = Math.min(9999, player.gold + Math.max(1,Math.floor(land.length/3)));
-    for (const tile of land) if (tile.troops < 99 && tick % 3 === 0) tile.troops++;
-  }
-  broadcast();
-}, TICK_MS);
-http.listen(port,'0.0.0.0',()=>console.log('Frontier server listening on '+port));
+async function boot() {
+  await restoreSnapshot();
+  setInterval(() => {
+    tick++;
+    for (const player of players.values()) {
+      const land = tiles.filter(t=>t.owner===player.id);
+      player.gold = Math.min(9999, player.gold + Math.max(1,Math.floor(land.length/3)));
+      for (const tile of land) if (tile.troops < 99 && tick % 3 === 0) tile.troops++;
+    }
+    broadcast();
+    if (tick % 3 === 0) persistSnapshot();
+  }, TICK_MS);
+  http.listen(port,'0.0.0.0',()=>console.log('Frontier server listening on '+port));
+}
+process.on('SIGTERM', async () => { await saveQueue; if (supabase) await persistSnapshot(); http.close(() => process.exit(0)); });
+void boot();
