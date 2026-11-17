@@ -153,7 +153,7 @@ function freshWorld(randomMap = true) {
   const connected = [...players.values()].filter(p => p.connected).slice(0, MAX_PLAYERS);
   players.clear();
   connected.forEach((p,slot) => {
-    p.gold = 160; p.score = 0; p.home = -1; p.color = colorFor(slot);p.territory=0;p.troopsTotal=0;p.troopMax=0;
+    p.gold = 160; p.score = 0; p.home = -1; p.color = colorFor(slot);p.territory=0;p.troopsTotal=0;p.troopMax=0;p.troopRate=0;p.goldRate=1;
     players.set(p.id,p);
   });
   const used = new Set<number>();
@@ -224,7 +224,7 @@ function join(client: Client, requestedName?: string, requestedPreference?: stri
   const preference = ['northwest','north','northeast','west','center','east','southwest','south','southeast'].includes(requestedPreference || '') ? requestedPreference! : 'auto';
   if (!player) {
     const name = (requestedName || 'Commander').replace(/[^a-zA-Z0-9 _-]/g, '').trim().slice(0, 18) || 'Commander';
-    player = { id: client.id, name, color: colorFor(players.size), gold: 160, score: 0, connected: true, home: -1, spawnPreference: preference, workerRatio:30, territory:0, troopsTotal:0, troopMax:0 };
+    player = { id: client.id, name, color: colorFor(players.size), gold: 160, score: 0, connected: true, home: -1, spawnPreference: preference, workerRatio:30, territory:0, troopsTotal:0, troopMax:0, troopRate:0, goldRate:1 };
     players.set(client.id, player);
     roundPlayerCount = Math.max(roundPlayerCount, players.size);
     const used = new Set([...players.values()].filter(p=>p.id!==player!.id).map(p=>p.home).filter(h=>h>=0));
@@ -531,8 +531,7 @@ async function boot(){
    // Resource values are scaled down by 1,000 versus OpenFront so Frontier's
    // existing building prices remain meaningful.
    const maxTroops=Math.floor(2*(Math.pow(Math.max(1,stats.land),.6)+50)+stats.cityLevels*250);
-   const bot=false; // live-server slots are human commanders
-   const baseGoldPerSecond=bot?.5:1;
+   const baseGoldPerSecond=1;
    const baseTroopRate=(.01+Math.pow(Math.max(0,stats.troops),.73)/(4*Math.pow(1000,.27)))*10;
    const troopRate=Math.max(0,baseTroopRate*(1-stats.troops/Math.max(1,maxTroops)))*(1+Math.min(12,stats.farms)*.08);
    player.territory=stats.land;player.troopsTotal=stats.troops;player.troopMax=maxTroops;
