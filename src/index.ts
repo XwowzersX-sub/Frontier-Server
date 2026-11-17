@@ -372,13 +372,15 @@ function advanceExpansionFronts(){
   const expansion=activeExpansions[e]!,player=players.get(expansion.owner);
   if(!player){activeExpansions.splice(e,1);continue;}
   const strength=expansion.targetOwner?Math.max(.6,Math.min(2,expansion.defenderTroops/Math.max(1,expansion.sent))):1;
-  const batch=Math.max(2,Math.min(12,Math.ceil(expansion.frontWidth/(1+strength)*1.8)));
+  // Unclaimed settlement growth advances as a broad connected wave; contested land keeps its current progression.
+  const settlementSweep=expansion.targetOwner===null;
+  const batch=settlementSweep?Math.min(expansion.candidates.length-expansion.cursor,Math.max(96,Math.min(288,Math.ceil(expansion.frontWidth*10)))):Math.max(2,Math.min(12,Math.ceil(expansion.frontWidth/(1+strength)*1.8)));
   const end=Math.min(expansion.candidates.length,expansion.cursor+batch);
   while(expansion.cursor<end){
    const candidate=expansion.candidates[expansion.cursor++]!,tile=tiles[candidate.index]!;
    if(tile.terrain==='water'||tile.owner!==expansion.targetOwner)continue;
    const onBorder=neighbors(candidate.index).some(next=>tiles[next]!.owner===expansion.owner);
-   if(!onBorder)continue;
+   if(!settlementSweep&&!onBorder)continue;
    const defensePost=(tile.buildings||[]).some(b=>b.type==='defense_post');
    const strength=expansion.targetOwner?Math.max(.6,Math.min(2,expansion.defenderTroops/Math.max(1,expansion.sent))):1;
    const cost=candidate.pressure*(expansion.targetOwner?strength:1)+(expansion.targetOwner?tile.troops*.015:0)+(defensePost?.55:0);
