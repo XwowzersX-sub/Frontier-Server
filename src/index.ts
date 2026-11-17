@@ -26,7 +26,7 @@ type StatIncrement = {gamesPlayed?:number;wins?:number;losses?:number;playTimeSe
 type Ship = { id: string; owner: string; from: number; to: number; path: number[]; step: number; kind: 'colony'|'trade'; destinationOwner?: string };
 type MatchPhase='countdown'|'spawning'|'playing';
 type GameState = { width: number; height: number; players: Player[]; tick: number; round: number; mapName: string; mapSeed: number; playable: number; capacity: number; ships: Array<{id:string;owner:string;x:number;y:number;kind:string}>; expansions?:Array<{owner:string;tile:number;troops:number}>; phase:MatchPhase;countdownEndsAt:number;spawnEndsAt:number;serverTime:number };
-type ExpansionCandidate={index:number;edge:number;pressure:number};
+type ExpansionCandidate={index:number;edge:number;pressure:number;priority:number};
 type ActiveExpansion={id:string;owner:string;targetOwner:string|null;sent:number;remaining:number;defenderTroops:number;frontWidth:number;launchIndex:number;candidates:ExpansionCandidate[];cursor:number;captured:number};
 const players = new Map<string, Player>();
 const clients = new Map<WebSocket, Client>();
@@ -355,41 +355,43 @@ function neighbors8(i: number) {
   return out;
 }
 function buildExpansionCandidates(ownerId:string,targetOwner:string|null,owned:number[],centerX:number,centerY:number,dirX:number,dirY:number,targetIndex:number,sent:number):ExpansionCandidate[]{
- const visited=new Uint8Array(tiles.length),edgeByIndex=new Float32Array(tiles.length),queue=new Int32Array(tiles.length);
- edgeByIndex.fill(Infinity);
- const candidates:ExpansionCandidate[]=[];let head=0,tail=0;
+ const visited=new Uint8Array(tiles.length),simulatedOwned=new Uint8Array(tiles.length);
+ const heap:ExpansionCandidate[]=[],candidates:ExpansionCandidate[]=[];
  const tx=targetIndex%WIDTH,ty=Math.floor(targetIndex/WIDTH),limit=Math.min(16000,Math.max(160,Math.ceil(sent*90)));
  const canEnter=(i:number)=>tiles[i]!.terrain!=='water'&&tiles[i]!.owner===targetOwner;
- const seeds:{index:number;edge:number}[]=[];
- for(const i of owned){
-  for(const next of neighbors(i)){
-   if(visited[next]||!canEnter(next))continue;
-   const x=next%WIDTH,y=Math.floor(next/WIDTH),rx=x-centerX,ry=y-centerY;
-   const forward=rx*dirX+ry*dirY,lateral=Math.abs(rx*dirY-ry*dirX);
-   const targetBias=Math.hypot(tx-x,ty-y)*.0007;
-   const edge=.55+lateral*.018-forward*.035+targetBias+(valueNoise(x*.08,y*.08,mapSeed)-.5)*.025;
-   visited[next]=1;edgeByIndex[next]=edge;seeds.push({index:next,edge});
-  }
- }
- seeds.sort((left,right)=>left.edge-right.edge);
- for(const seed of seeds){
-  if(tail>=queue.length)break;
-  queue[tail++]=seed.index;
-  const tile=tiles[seed.index]!,pressure=tile.terrain==='mountain'?.34:tile.terrain==='forest'?.19:.16;
-  candidates.push({index:seed.index,edge:seed.edge,pressure});
- }
- while(head<tail&&candidates.length<limit){
-  const current=queue[head++]!,x=current%WIDTH,y=Math.floor(current/WIDTH),parentEdge=edgeByIndex[current]||1;
-  for(const next of neighbors(current)){
-   if(visited[next]||!canEnter(next)||tail>=queue.length)continue;
-   const nx=next%WIDTH,ny=Math.floor(next/WIDTH),stepX=nx-x,stepY=ny-y;
-   const forwardStep=stepX*dirX+stepY*dirY,lateralStep=Math.abs(stepX*dirY-stepY*dirX);
-   const edge=parentEdge+.86-forwardStep*.24+lateralStep*.10+(valueNoise(nx*.11,ny*.11,mapSeed)-.5)*.02;
-   visited[next]=1;edgeByIndex[next]=edge;queue[tail++]=next;
-   const tile=tiles[next]!,pressure=tile.terrain==='mountain'?.34:tile.terrain==='forest'?.19:.16;
-   candidates.push({index:next,edge,pressure});
-   if(candidates.length>=limit)break;
-  }
+ const push=(candidate:ExpansionCandidate)=>{
+  let i=heap.length;heap.push(candidate);
+  while(i>0){const parent=(i-1)>>1;if(heap[parent]!.priority<=candidate.priority)break;heap[i]=heap[parent]!;i=parent;}
+  heap[i]=candidate;
+ };
+ const pop=():ExpansionCandidate|undefined=>{
+  if(!heap.length)return undefined;
+  const first=heap[0]!,last=heap.pop()!;
+  if(heap.length){let i=0;while(true){const left=i*2+1,right=left+1;if(left>=heap.length)break;const child=right<heap.length&&heap[right]!.priority<heap[left]!.priority?right:left;if(heap[child]!.priority>=last.priority)break;heap[i]=heap[child]!;i=child;}heap[i]=last;}
+  return first;
+ };
+ const addFrontierTile=(tileIndex:number)=>{
+  if(visited[tileIndex]||!canEnter(tileIndex))return;
+  visited[tileIndex]=1;
+  const tile=tiles[tileIndex]!,x=tileIndex%WIDTH,y=Math.floor(tileIndex/WIDTH),rx=x-centerX,ry=y-centerY;
+  const forward=rx*dirX+ry*dirY,lateral=Math.abs(rx*dirY-ry*dirX);
+  const edge=.55+lateral*.018-forward*.035+Math.hypot(tx-x,ty-y)*.0007+(valueNoise(x*.08,y*.08,mapSeed)-.5)*.025;
+  let adjacentOwned=0;
+  for(const next of neighbors(tileIndex))if(tiles[next]!.owner===ownerId||simulatedOwned[next])adjacentOwned++;
+  const terrainBias=tile.terrain==='mountain'?2:tile.terrain==='forest'?1.5:1;
+  // OpenFront-style heap priority: each claimed tile exposes a fresh border,
+  // and the next tile is chosen from the whole active edge, not a fixed line.
+  const priority=valueNoise(x*.17,y*.17,mapSeed+tileIndex)*7+(1-adjacentOwned*.5+terrainBias/2)*10+Math.max(0,lateral-Math.max(0,forward)*.25)*.012-Math.max(0,forward)*.002;
+  const pressure=tile.terrain==='mountain'?.34:tile.terrain==='forest'?.19:.16;
+  push({index:tileIndex,edge,pressure,priority});
+ };
+ for(const i of owned)for(const next of neighbors(i))addFrontierTile(next);
+ while(heap.length&&candidates.length<limit){
+  const candidate=pop();if(!candidate)break;
+  if(!canEnter(candidate.index))continue;
+  candidates.push(candidate);
+  simulatedOwned[candidate.index]=1;
+  for(const next of neighbors(candidate.index))addFrontierTile(next);
  }
  return candidates;
 }
@@ -445,7 +447,7 @@ function advanceExpansionFronts(){
   // Unclaimed settlement growth advances as a broad connected wave; contested land keeps its current progression.
   const settlementSweep=expansion.targetOwner===null;
   // Small, frequent steps make the frontier read as a continuous flow instead of a single large fill.
-  const batch=settlementSweep?Math.min(expansion.candidates.length-expansion.cursor,Math.max(6,Math.min(16,Math.ceil(expansion.frontWidth*.03)))):Math.max(3,Math.min(6,Math.ceil(expansion.frontWidth/(1+strength)*.8)));
+  const batch=settlementSweep?Math.min(expansion.candidates.length-expansion.cursor,Math.max(8,Math.min(48,Math.ceil(expansion.frontWidth*.35)))):Math.max(6,Math.min(30,Math.ceil(expansion.frontWidth*.22)));
   const end=Math.min(expansion.candidates.length,expansion.cursor+batch);
   while(expansion.cursor<end){
    const candidate=expansion.candidates[expansion.cursor++]!,tile=tiles[candidate.index]!;
