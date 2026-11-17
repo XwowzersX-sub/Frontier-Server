@@ -36,39 +36,67 @@ function chunkKeyForTile(i:number){return chunkKey(Math.floor((i%WIDTH)/CHUNK_SI
 
 function index(x: number, y: number) { return y * WIDTH + x; }
 function colorFor(slot: number) { return 'hsl(' + ((slot * 137.508 + 195) % 360).toFixed(1) + ' 66% 58%)'; }
-function hashNoise(x: number, y: number, seed: number) {
-  const v = Math.sin((x + seed * 31.7) * 12.9898 + (y - seed * 17.3) * 78.233) * 43758.5453;
-  return Math.abs(v) % 1;
+function latticeNoise(x:number,y:number,seed:number){
+  let n=(Math.imul(x|0,374761393)^Math.imul(y|0,668265263)^Math.imul(seed|0,1442695041))|0;
+  n=Math.imul(n^(n>>>13),1274126177);
+  return((n^(n>>>16))>>>0)/4294967295;
 }
-function makeMap(name: string, seed: number): Tile[] {
-  return Array.from({ length: WIDTH * HEIGHT }, (_, i) => {
-    const x = i % WIDTH, y = Math.floor(i / WIDTH);
-    const nx = (x - WIDTH / 2) / (WIDTH / 2), ny = (y - HEIGHT / 2) / (HEIGHT / 2);
-    const wave = Math.sin(x * .055 + seed) * .42 + Math.cos(y * .073 - seed * .7) * .36
-      + Math.sin((x + y) * .031 + seed * 1.4) * .27 + Math.cos((x - y) * .039 - seed) * .2;
-    const n = hashNoise(x, y, seed), d1 = Math.hypot((nx + .48) * .94, (ny + .05) * 1.12), d2 = Math.hypot((nx - .43) * 1.05, (ny - .1) * 1.06);
-    let land = wave > -.2;
-    if (name === 'Island Chain') land = wave > .18;
-    if (name === 'Pangaea') land = (nx * nx * .86 + ny * ny * 1.2 < .82) && wave > -.95;
-    if (name === 'Highlands') land = wave > -.32;
-    if (name === 'Twin Worlds') land = (d1 < .73 || d2 < .72) && wave > -.48;
-    if (name === 'Inland Sea') land = wave > -.18 && !(Math.pow(nx / .42, 2) + Math.pow(ny / .34, 2) < 1);
-    if (name === 'Atolls') {
-      const ring1 = Math.abs(Math.hypot(nx + .42, ny + .08) - .34) < .15;
-      const ring2 = Math.abs(Math.hypot(nx - .4, ny - .13) - .3) < .14;
-      land = ring1 || ring2 || (wave > .45 && Math.abs(nx) < .8);
-    }
-    if (name === 'Supercontinent') land = Math.abs(nx) < .91 && Math.abs(ny) < .82 && wave > -.78;
-    if (name === 'Fractal Wilds') land = wave > -.05;
-    if (name === 'Earthlike') land = (wave > -.08 && (nx < .28 || ny > -.38)) || (d1 < .62 && wave > -.55);
-    const edge = x < 2 || y < 2 || x >= WIDTH - 2 || y >= HEIGHT - 2;
-    if (edge) land = false;
-    if (name === 'Pangaea' && Math.abs(nx + .16) < .035 && Math.abs(ny - .02) < .16) land = false;
-    if (name === 'Inland Sea' && Math.abs(nx) < .42 && Math.abs(ny) < .34) land = false;
-    const mountainChance = name === 'Highlands' ? .77 : .955;
-    const terrain: Tile['terrain'] = !land ? 'water' : n > mountainChance ? 'mountain' : n > .66 ? 'forest' : 'plain';
-    return { owner: null, terrain, troops: 0, buildings: [] };
-  });
+function valueNoise(x:number,y:number,seed:number){
+  const ix=Math.floor(x),iy=Math.floor(y),fx=x-ix,fy=y-iy;
+  const sx=fx*fx*(3-2*fx),sy=fy*fy*(3-2*fy);
+  const a=latticeNoise(ix,iy,seed),b=latticeNoise(ix+1,iy,seed),c=latticeNoise(ix,iy+1,seed),d=latticeNoise(ix+1,iy+1,seed);
+  const top=a+(b-a)*sx,bottom=c+(d-c)*sx;
+  return top+(bottom-top)*sy;
+}
+function terrainAt(x:number,y:number,name:string,seed:number):Tile['terrain']{
+  const nx=(x-WIDTH/2)/(WIDTH/2),ny=(y-HEIGHT/2)/(HEIGHT/2);
+  const warpX=(valueNoise(x*.004,y*.004,seed+811)-.5)*44;
+  const warpY=(valueNoise(x*.004,y*.004,seed+977)-.5)*44;
+  const px=x+warpX,py=y+warpY;
+  const macro=valueNoise(px*.0032,py*.0032,seed+11)-.5;
+  const regional=valueNoise(px*.012,py*.012,seed+73)-.5;
+  const detail=valueNoise(px*.04,py*.04,seed+137)-.5;
+  const field=macro*.62+regional*.28+detail*.10;
+  const d1=Math.hypot((nx+.48)*.94,(ny+.05)*1.12),d2=Math.hypot((nx-.43)*1.05,(ny-.1)*1.06);
+  const key=String(name||'Continents').toLowerCase().replace(/[^a-z]+/g,'-');
+  let land=false;
+  if(key==='islands'||key==='island-chain')land=field>.12;
+  else if(key==='pangaea'){
+    const radius=Math.sqrt(nx*nx*.86+ny*ny*1.2);
+    land=field+(.88-radius)*.55>-.05;
+    if(Math.abs(nx+.16)<.035&&Math.abs(ny-.02)<.16)land=false;
+  }else if(key==='highlands')land=field>-.12;
+  else if(key==='twin-worlds')land=field+(.9-Math.min(d1/.73,d2/.72))*.44>-.05;
+  else if(key==='inland-sea'){
+    const seaRadius=Math.sqrt(Math.pow(nx/.42,2)+Math.pow(ny/.34,2));
+    land=field>-.03&&seaRadius>.92+detail*.24;
+  }else if(key==='atolls'){
+    const ring1=Math.abs(Math.hypot(nx+.42,ny+.08)-.34);
+    const ring2=Math.abs(Math.hypot(nx-.4,ny-.13)-.3);
+    const atoll=Math.max(1-ring1/.17,1-ring2/.16);
+    land=atoll+field*.22>.12||(field>.3&&Math.abs(nx)<.8);
+  }else if(key==='supercontinent'){
+    const edge=Math.max(Math.abs(nx)/.91,Math.abs(ny)/.82);
+    land=field+(.98-edge)*.55>-.2;
+  }else if(key==='fractal'||key==='fractal-wilds')land=field>-.04;
+  else if(key==='earthlike'){
+    const continents=Math.max(field+(.78-d1)*.56,field+(.72-d2)*.48);
+    land=continents>-.08&&(nx<.28||ny>-.38||d1<.62);
+  }else land=field>-.02;
+  if(x<2||y<2||x>=WIDTH-2||y>=HEIGHT-2)land=false;
+  if(!land)return'water';
+  const elevation=macro*.45+regional*.4+detail*.15;
+  const moisture=valueNoise(px*.021,py*.021,seed+313)-.5;
+  if(elevation>(key==='highlands'?.075:.205))return'mountain';
+  return moisture>.035?'forest':'plain';
+}
+function makeMap(name:string,seed:number):Tile[]{
+  return Array.from({length:WIDTH*HEIGHT},(_,i)=>({
+    owner:null,
+    terrain:terrainAt(i%WIDTH,Math.floor(i/WIDTH),name,seed),
+    troops:0,
+    buildings:[]
+  }));
 }
 function neighbors(i: number) {
   const x = i % WIDTH, y = Math.floor(i / WIDTH);
@@ -277,43 +305,34 @@ function claim(client: Client, player: Player, message: any) {
   const sent = Math.floor(source.troops * percent / 100);
   if (sent < 1) { send(client.socket,{type:'error',text:'Not enough troops in that territory.'}); return; }
   source.troops -= sent;
-  const maxRadius=Math.min(15,Math.max(3,Math.floor(3+Math.sqrt(sent)*.34)));
-  const queue:{index:number;troops:number;depth:number}[]=[{index:sourceIndex,troops:sent,depth:0}];
-  const visited=new Set<number>([sourceIndex]);
-  let captured=0,processed=0,remainingArmy=0;
-  while(queue.length && processed<220) {
-    const wave=queue.shift()!; processed++;
-    if(wave.depth>=maxRadius || wave.troops<3) continue;
-    const candidates=neighbors8(wave.index).filter(next=>{
-      if(visited.has(next)) return false;
-      const tile=tiles[next]!;
-      if(tile.terrain==='water'||tile.terrain==='mountain'||tile.owner===player.id) return false;
-      const rx=(next%WIDTH)-sx,ry=Math.floor(next/WIDTH)-sy,radial=Math.hypot(rx,ry);
-      if(radial>maxRadius||radial<.1) return false;
-      const forward=(rx*dirX+ry*dirY)/(radial||1);
-      return forward>-.08;
-    }).map(next=>{
-      const rx=(next%WIDTH)-sx,ry=Math.floor(next/WIDTH)-sy,radial=Math.hypot(rx,ry);
-      const forward=(rx*dirX+ry*dirY)/(radial||1),lateral=Math.abs(rx*dirY-ry*dirX)/(radial||1);
-      const tile=tiles[next]!;
-      return {next,score:forward*1.7-lateral*.48+(tile.owner?-.08:0)+Math.random()*.23};
-    }).sort((a,b)=>b.score-a.score);
-    if(!candidates.length){remainingArmy+=wave.troops;continue;}
-    const branchCount=Math.min(wave.depth<2?3:2,candidates.length,Math.max(1,Math.floor(wave.troops/4)));
-    const chosen=candidates.slice(0,branchCount),share=Math.floor(wave.troops/branchCount);
-    for(const option of chosen) {
-      const next=option.next; visited.add(next);
-      const tile=tiles[next]!;
-      const defender=Math.ceil(tile.troops*((tile.buildings||[]).some(b=>b.type==='defense_post')?2:1));
-      const attrition=Math.max(1,Math.ceil(share*(.025+wave.depth*.004)));
-      const effective=share-attrition;
-      if(effective<=defender){tile.troops=Math.max(0,defender-effective);continue;}
-      if(tile.owner){const previous=players.get(tile.owner);if(previous)previous.score=Math.max(0,previous.score-1);}
-      const survivors=effective-defender-1;
-      tile.owner=player.id;tile.troops=survivors;player.score++;captured++;markTile(next);
-      if(survivors>=3)queue.push({index:next,troops:survivors,depth:wave.depth+1});
-      else remainingArmy+=survivors;
+  const radius=Math.min(15,Math.max(3,2.2+Math.sqrt(sent)*.38));
+  const extent=Math.ceil(radius*1.45),fieldSeed=mapSeed+sourceIndex*17+targetIndex*31+sent*13;
+  const minX=Math.max(0,sx-extent),maxX=Math.min(WIDTH-1,sx+extent);
+  const minY=Math.max(0,sy-extent),maxY=Math.min(HEIGHT-1,sy+extent);
+  const candidates:{index:number;edge:number;pressure:number}[]=[];
+  for(let y=minY;y<=maxY;y++)for(let x=minX;x<=maxX;x++){
+    const rx=x-sx,ry=y-sy,forward=rx*dirX+ry*dirY,lateral=Math.abs(rx*dirY-ry*dirX);
+    const normalized=Math.hypot(lateral/(radius*.86),(forward-radius*.13)/(radius*1.1));
+    const warped=normalized-(valueNoise(x*.16,y*.16,fieldSeed)-.5)*.14;
+    if(warped>=1||forward< -radius*.55||(!rx&&!ry))continue;
+    const falloff=Math.pow(Math.max(0,1-warped),.72);
+    const pressure=sent/(radius*radius*.96)*falloff*(.86+.14*Math.max(0,forward/radius));
+    if(pressure>=1)candidates.push({index:y*WIDTH+x,edge:warped,pressure});
+  }
+  candidates.sort((a,b)=>a.edge-b.edge);
+  let captured=0;
+  for(const candidate of candidates){
+    const tile=tiles[candidate.index]!;
+    if(tile.terrain==='water'||tile.terrain==='mountain'||tile.owner===player.id)continue;
+    const defender=Math.ceil(tile.troops*((tile.buildings||[]).some(b=>b.type==='defense_post')?2:1));
+    const required=defender+1;
+    if(candidate.pressure<required){
+      if(tile.owner&&defender>0){tile.troops=Math.max(0,defender-Math.floor(candidate.pressure));markTile(candidate.index);}
+      continue;
     }
+    if(tile.owner){const previous=players.get(tile.owner);if(previous)previous.score=Math.max(0,previous.score-1);}
+    tile.owner=player.id;tile.troops=Math.max(0,Math.floor(candidate.pressure-required));
+    player.score++;captured++;markTile(candidate.index);
   }
   if(!captured) {
     markTile(sourceIndex);
