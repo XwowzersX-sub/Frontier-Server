@@ -20,7 +20,7 @@ const MAPS = ['Continents','Island Chain','Pangaea','Highlands','Twin Worlds','I
 type BuildingType = 'city' | 'factory' | 'port' | 'defense_post' | 'market' | 'farm';
 type Building = { type: BuildingType; level: number };
 type Tile = { owner: string | null; terrain: 'plain' | 'forest' | 'mountain' | 'water'; troops: number; buildings: Building[] };
-type Player = { id: string; name: string; color: string; gold: number; score: number; connected: boolean; home: number; spawnPreference: string; workerRatio?: number; territory?:number; troopsTotal?:number; troopMax?:number };
+type Player = { id: string; name: string; color: string; gold: number; score: number; connected: boolean; home: number; spawnPreference: string; workerRatio?: number; territory?:number; troopsTotal?:number; troopMax?:number; troopRate?:number; goldRate?:number };
 type Client = { id: string; socket: WebSocket; joined: boolean; lastAction: number; loadedChunks: Set<string> };
 type Ship = { id: string; owner: string; from: number; to: number; path: number[]; step: number; kind: 'colony'|'trade'; destinationOwner?: string };
 type GameState = { width: number; height: number; players: Player[]; tick: number; round: number; mapName: string; mapSeed: number; playable: number; capacity: number; ships: Array<{id:string;owner:string;x:number;y:number;kind:string}> };
@@ -139,7 +139,7 @@ function spawn(player: Player, used: Set<number>) {
     if (tile.terrain === 'water' || tile.terrain === 'mountain') tile.terrain = 'plain';
   }
   used.add(chosen);
-  player.home=chosen;player.territory=1;player.troopsTotal=36;player.troopMax=130;
+  player.home=chosen;player.territory=1;player.troopsTotal=36;player.troopMax=102;
   tiles[chosen]={owner:player.id,terrain:'plain',troops:36,buildings:[]};
   for(let dy=-3;dy<=3;dy++)for(let dx=-3;dx<=3;dx++){const x=sx+dx,y=sy+dy;if(x>=0&&x<WIDTH&&y>=0&&y<HEIGHT)markTile(index(x,y));}
 }
@@ -291,22 +291,56 @@ function claim(client: Client, player: Player, message: any) {
   if (!Number.isInteger(targetIndex) || targetIndex < 0 || targetIndex >= tiles.length) return;
   const target = tiles[targetIndex]!;
   if (target.owner === player.id) { send(client.socket,{type:'error',text:'That territory is already yours.'}); return; }
-  if (target.terrain === 'mountain' || target.terrain === 'water') { send(client.socket,{type:'error',text:'Choose a land region.'}); return; }
-  const sourceIndex = Number.isInteger(message.source) ? Number(message.source) : -1;
-  if (sourceIndex < 0 || sourceIndex >= tiles.length || tiles[sourceIndex]!.owner !== player.id) {
-    send(client.socket,{type:'error',text:'Select one of your own launch territories first.'}); return;
+  if (target.terrain === 'mountain' || target.terrain === 'water') { send(client.socket,{type:'error',text:'Click a land region to set your expansion direction.'}); return; }
+
+  // Work out the whole nation's reserve and center. The click gives direction,
+  // while the server chooses the best-facing outer border automatically.
+  const owned:number[]=[];
+  let totalTroops=0,centerX=0,centerY=0;
+  for(let i=0;i<tiles.length;i++){
+    const tile=tiles[i]!;
+    if(tile.owner!==player.id)continue;
+    owned.push(i);totalTroops+=tile.troops;centerX+=i%WIDTH;centerY+=Math.floor(i/WIDTH);
   }
-  const sx=sourceIndex%WIDTH,sy=Math.floor(sourceIndex/WIDTH),tx=targetIndex%WIDTH,ty=Math.floor(targetIndex/WIDTH);
-  const dx=tx-sx,dy=ty-sy,distance=Math.hypot(dx,dy);
-  if (distance > 15) { send(client.socket,{type:'error',text:'That frontier is too far away. Select a destination within 15 tiles.'}); return; }
-  const dirX=dx/(distance||1),dirY=dy/(distance||1);
-  const percent = Math.max(1,Math.min(100,Math.floor(Number(message.percent)||50)));
-  const source = tiles[sourceIndex]!;
-  const sent = Math.floor(source.troops * percent / 100);
-  if (sent < 1) { send(client.socket,{type:'error',text:'Not enough troops in that territory.'}); return; }
-  source.troops -= sent;
-  const radius=Math.min(15,Math.max(3,2.2+Math.sqrt(sent)*.38));
-  const extent=Math.ceil(radius*1.45),fieldSeed=mapSeed+sourceIndex*17+targetIndex*31+sent*13;
+  if(!owned.length||totalTroops<1){send(client.socket,{type:'error',text:'Your nation has no available troops.'});return;}
+  centerX/=owned.length;centerY/=owned.length;
+  const tx=targetIndex%WIDTH,ty=Math.floor(targetIndex/WIDTH);
+  let dirX=tx-centerX,dirY=ty-centerY,distance=Math.hypot(dirX,dirY);
+  if(distance<0.001&&player.home>=0){
+    dirX=(player.home%WIDTH)-centerX;dirY=Math.floor(player.home/WIDTH)-centerY;distance=Math.hypot(dirX,dirY);
+  }
+  if(distance<0.001){dirX=1;dirY=0;distance=1;}
+  dirX/=distance;dirY/=distance;
+
+  let launchIndex=-1,bestScore=-Infinity;
+  for(const i of owned){
+    const border=neighbors(i).some(next=>{
+      const tile=tiles[next]!;
+      return tile.owner!==player.id&&tile.terrain!=='water'&&tile.terrain!=='mountain';
+    });
+    if(!border)continue;
+    const x=i%WIDTH,y=Math.floor(i/WIDTH),rx=x-centerX,ry=y-centerY;
+    const forward=rx*dirX+ry*dirY,lateral=Math.abs(rx*dirY-ry*dirX);
+    const targetDistance=Math.hypot(tx-x,ty-y);
+    const score=forward-lateral*.32-targetDistance*.015;
+    if(score>bestScore){bestScore=score;launchIndex=i;}
+  }
+  if(launchIndex<0){
+    let nearest=Infinity;
+    for(const i of owned){const d=Math.hypot(tx-i%WIDTH,ty-Math.floor(i/WIDTH));if(d<nearest){nearest=d;launchIndex=i;}}
+  }
+
+  const percent = Math.max(1,Math.min(100,Math.floor(Number.isFinite(Number(message.percent))?Number(message.percent):25)));
+  const sent = Math.floor(totalTroops * percent / 100);
+  if (sent < 1) { send(client.socket,{type:'error',text:'Not enough troops are available for this expansion.'}); return; }
+
+  // Deduct proportionally from all land tiles; there is no selected source tile.
+  const withdrawal=sent/totalTroops;
+  for(const i of owned){tiles[i]!.troops=Math.max(0,tiles[i]!.troops*(1-withdrawal));markTile(i);}
+
+  const sx=launchIndex%WIDTH,sy=Math.floor(launchIndex/WIDTH);
+  const radius=Math.min(18,Math.max(2.5,1.7+Math.sqrt(sent)*.28));
+  const extent=Math.ceil(radius*1.45),fieldSeed=mapSeed+launchIndex*17+targetIndex*31+sent*13;
   const minX=Math.max(0,sx-extent),maxX=Math.min(WIDTH-1,sx+extent);
   const minY=Math.max(0,sy-extent),maxY=Math.min(HEIGHT-1,sy+extent);
   const candidates:{index:number;edge:number;pressure:number}[]=[];
@@ -334,13 +368,13 @@ function claim(client: Client, player: Player, message: any) {
     tile.owner=player.id;tile.troops=Math.max(0,Math.floor(candidate.pressure-required));
     player.score++;captured++;markTile(candidate.index);
   }
-  if(!captured) {
-    markTile(sourceIndex);
-    notify('🛡 ' + player.name + '\'s expansion wave ran out of strength before capturing land.');
-    broadcast(); void persistSnapshot(); return;
+  if(!captured){
+    const refund=Math.floor(sent*.7),home=player.home>=0&&tiles[player.home]?.owner===player.id?player.home:launchIndex;
+    if(home>=0){tiles[home]!.troops+=refund;markTile(home);}
   }
-  markTile(sourceIndex);
-  notify('⚔ ' + player.name + ' spread an army outward and captured ' + captured + ' territory tiles. Troops diminished along the way.');
+  notify(captured
+    ? '🌐 '+player.name+' launched a '+percent+'% national expansion and captured '+captured+' land tiles.'
+    : '🛡 '+player.name+' tried to expand in a direction with no reachable land; most troops returned.');
   broadcast();
   void persistSnapshot();
   checkVictory();
@@ -494,15 +528,21 @@ async function boot(){
   }
   for(const player of players.values()){
    const stats=summary.get(player.id)!;
-   const workers=Math.max(0,Math.min(100,Number(player.workerRatio??30)));
-   const maxTroops=Math.floor(2*(Math.pow(Math.max(1,stats.land),.6)*15+50)+stats.cityLevels*180);
+   // Resource values are scaled down by 1,000 versus OpenFront so Frontier's
+   // existing building prices remain meaningful.
+   const maxTroops=Math.floor(2*(Math.pow(Math.max(1,stats.land),.6)+50)+stats.cityLevels*250);
+   const bot=false; // live-server slots are human commanders
+   const baseGoldPerSecond=bot?.5:1;
+   const baseTroopRate=(.01+Math.pow(Math.max(0,stats.troops),.73)/(4*Math.pow(1000,.27)))*10;
+   const troopRate=Math.max(0,baseTroopRate*(1-stats.troops/Math.max(1,maxTroops)))*(1+Math.min(12,stats.farms)*.08);
    player.territory=stats.land;player.troopsTotal=stats.troops;player.troopMax=maxTroops;
-   player.gold=Math.min(999999,player.gold+Math.max(1,Math.floor(stats.land*(.2+workers*.035)))+stats.income);
+   player.troopRate=troopRate;
+   player.goldRate=baseGoldPerSecond+stats.income/(TICK_MS/1000);
+   player.gold=Math.min(999999,player.gold+baseGoldPerSecond*(TICK_MS/1000)+stats.income);
    const home=player.home>=0&&tiles[player.home]?.owner===player.id?player.home:stats.home;
    if(home>=0){
-    const growth=(2+Math.sqrt(stats.troops)*.08)*(1+Math.min(12,stats.farms)*.08)*(1-stats.troops/Math.max(1,maxTroops))*(1-workers/135);
-    const add=Math.max(0,Math.floor(growth));
-    if(add&&tick%2===0){tiles[home]!.troops+=add;markTile(home);}
+    const add=Math.min(Math.max(0,maxTroops-stats.troops),troopRate*(TICK_MS/1000));
+    if(add>0){tiles[home]!.troops+=add;player.troopsTotal=stats.troops+add;markTile(home);}
    }
   }
   // Civilian ferries colonize unclaimed coast; trade ships connect ports and share gold.
