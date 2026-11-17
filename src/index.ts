@@ -17,7 +17,7 @@ const supabase = process.env.SUPABASE_URL && process.env.SUPABASE_SECRET_KEY
 
 const WIDTH = 1000, HEIGHT = 1000, TICK_MS = 4500, MAX_PLAYERS = 50, WIN_LAND = 0.8, CHUNK_SIZE = 64;
 const MAPS = ['Continents','Island Chain','Pangaea','Highlands','Twin Worlds','Inland Sea','Atolls','Supercontinent','Fractal Wilds','Earthlike'];
-type BuildingType = 'city' | 'factory' | 'port' | 'defense_post' | 'market' | 'farm';
+type BuildingType = 'city' | 'factory' | 'port' | 'defense_post' | 'market' | 'farm' | 'highway';
 type Building = { type: BuildingType; level: number };
 type Tile = { owner: string | null; terrain: 'plain' | 'forest' | 'mountain' | 'water'; troops: number; buildings: Building[] };
 type Player = { id: string; name: string; color: string; gold: number; score: number; connected: boolean; home: number; spawnPreference: string; workerRatio?: number; territory?:number; troopsTotal?:number; troopMax?:number; troopRate?:number; goldRate?:number };
@@ -180,7 +180,7 @@ async function restoreSnapshot(){
   tick=Number.isFinite(saved.tick)?saved.tick:0;round=Math.max(1,Number(saved.round)||1);mapName=MAPS.includes(saved.mapName)?saved.mapName:'Continents';mapSeed=Number(saved.mapSeed);
   if(saved.phase==='countdown'||saved.phase==='spawning'||saved.phase==='playing'){restoredPhaseSnapshot=true;matchPhase=saved.phase;countdownEndsAt=Math.max(0,Number(saved.countdownEndsAt)||0);spawnEndsAt=Math.max(0,Number(saved.spawnEndsAt)||0);}
   tiles=makeMap(mapName,mapSeed);playableTiles=tiles.reduce((sum,t)=>sum+(t.terrain==='water'?0:1),0);persistentTiles.clear();dirtyTiles.clear();
-  for(const entry of saved.changes){if(!Array.isArray(entry)||!Number.isInteger(entry[0])||entry[0]<0||entry[0]>=tiles.length||!entry[1])continue;const t=entry[1] as Tile;if(!['plain','forest','mountain','water'].includes(t.terrain)||(t.owner!==null&&typeof t.owner!=='string'))continue;tiles[entry[0]]={owner:t.owner,terrain:t.terrain,troops:Math.max(0,Number(t.troops)||0),buildings:Array.isArray(t.buildings)?t.buildings.filter(b=>['city','factory','port','defense_post','market','farm'].includes(b.type)):[]};persistentTiles.add(entry[0]);}
+  for(const entry of saved.changes){if(!Array.isArray(entry)||!Number.isInteger(entry[0])||entry[0]<0||entry[0]>=tiles.length||!entry[1])continue;const t=entry[1] as Tile;if(!['plain','forest','mountain','water'].includes(t.terrain)||(t.owner!==null&&typeof t.owner!=='string'))continue;tiles[entry[0]]={owner:t.owner,terrain:t.terrain,troops:Math.max(0,Number(t.troops)||0),buildings:Array.isArray(t.buildings)?t.buildings.filter(b=>['city','factory','port','defense_post','market','farm','highway'].includes(b.type)):[]};persistentTiles.add(entry[0]);}
   players.clear();for(const p of saved.players)if(p&&typeof p.id==='string'&&typeof p.name==='string')players.set(p.id,{...p,connected:false,spawnPreference:p.spawnPreference||'auto',workerRatio:Number.isFinite(p.workerRatio)?p.workerRatio:30});
   activeExpansions.length=0;
   if(Array.isArray(saved.expansions))for(const expansion of saved.expansions.slice(0,100)){
@@ -372,7 +372,7 @@ function advanceExpansionFronts(){
   const expansion=activeExpansions[e]!,player=players.get(expansion.owner);
   if(!player){activeExpansions.splice(e,1);continue;}
   const strength=expansion.targetOwner?Math.max(.6,Math.min(2,expansion.defenderTroops/Math.max(1,expansion.sent))):1;
-  const batch=Math.max(1,Math.min(96,Math.ceil(expansion.frontWidth/(1+strength))));
+  const batch=Math.max(1,Math.min(5,Math.ceil(expansion.frontWidth/(1+strength))));
   const end=Math.min(expansion.candidates.length,expansion.cursor+batch);
   while(expansion.cursor<end){
    const candidate=expansion.candidates[expansion.cursor++]!,tile=tiles[candidate.index]!;
@@ -483,7 +483,7 @@ function command(client: Client, raw: string) {
     const building = message.building as BuildingType;
     const rules: Record<BuildingType,{cost:number;max:number}> = {
       city:{cost:100,max:4}, factory:{cost:150,max:3}, port:{cost:120,max:1},
-      defense_post:{cost:80,max:1}, market:{cost:130,max:3}, farm:{cost:80,max:3}
+      defense_post:{cost:80,max:1}, market:{cost:130,max:3}, farm:{cost:80,max:3}, highway:{cost:110,max:1}
     };
     const rule = rules[building];
     if (!rule || tile.owner !== player.id || tile.terrain === 'water' || tile.terrain === 'mountain') {
@@ -493,6 +493,7 @@ function command(client: Client, raw: string) {
     const existing = tile.buildings.filter(b => b.type === building);
     const currentLevel = building === 'city' ? (existing[0]?.level || 0) : existing.length;
     if (currentLevel >= rule.max) { send(client.socket,{type:'error',text:'That structure is already at its maximum level here.'}); return; }
+    if (building === 'highway' && !neighbors(targetIndex).some(n => { const neighbor=tiles[n]!; return neighbor.owner===player.id && (neighbor.buildings||[]).some(b=>['city','factory','market','highway'].includes(b.type)); })) { send(client.socket,{type:'error',text:'Highways must connect to a City, Factory, Market, or another Highway.'}); return; }
     if (building === 'port' && !neighbors(targetIndex).some(n => tiles[n]!.terrain === 'water')) {
       send(client.socket,{type:'error',text:'Ports must be built on a coastline.'}); return;
     }
@@ -559,7 +560,7 @@ async function boot(){
    broadcast();void persistSnapshot();
   }
  },250);
- setInterval(()=>{if(matchPhase!=='playing')return;advanceExpansionFronts();},150);
+ setInterval(()=>{if(matchPhase!=='playing')return;advanceExpansionFronts();},250);
  setInterval(()=>{
   if(matchPhase!=='playing')return;
   tick++;
@@ -574,6 +575,7 @@ async function boot(){
     if(building.type==='port')stats.income+=2;
     if(building.type==='market')stats.income+=4;
     if(building.type==='farm')stats.farms++;
+    if(building.type==='highway')stats.income+=2+(neighbors(i).some(n=>{const neighbor=tiles[n]!;return neighbor.owner===tile.owner&&(neighbor.buildings||[]).some(b=>['city','factory','market','highway'].includes(b.type));})?1:0);
    }
   }
   for(const player of players.values()){
@@ -582,8 +584,8 @@ async function boot(){
    // existing building prices remain meaningful.
    const maxTroops=Math.floor(2*(Math.pow(Math.max(1,stats.land),.6)+50)+stats.cityLevels*250);
    const baseGoldPerSecond=1;
-   const baseTroopRate=(.01+Math.pow(Math.max(0,stats.troops),.73)/(4*Math.pow(1000,.27)))*10;
-   const troopRate=Math.max(0,baseTroopRate*(1-stats.troops/Math.max(1,maxTroops)))*(1+Math.min(12,stats.farms)*.08);
+   const baseTroopRate=(.01+Math.pow(Math.max(0,stats.troops),.73)/(4*Math.pow(1000,.27)))*10*1.35;
+   const troopRate=Math.max(0,baseTroopRate*(1-stats.troops/Math.max(1,maxTroops)))*(1+Math.min(12,stats.farms)*.10);
    player.territory=stats.land;player.troopsTotal=stats.troops;player.troopMax=maxTroops;
    player.troopRate=troopRate;
    player.goldRate=baseGoldPerSecond+stats.income/(TICK_MS/1000);
