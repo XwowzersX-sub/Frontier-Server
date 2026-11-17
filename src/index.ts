@@ -24,10 +24,13 @@ type Player = { id: string; name: string; color: string; gold: number; score: nu
 type Client = { id: string; socket: WebSocket; joined: boolean; lastAction: number; loadedChunks: Set<string> };
 type Ship = { id: string; owner: string; from: number; to: number; path: number[]; step: number; kind: 'colony'|'trade'; destinationOwner?: string };
 type GameState = { width: number; height: number; players: Player[]; tick: number; round: number; mapName: string; mapSeed: number; playable: number; capacity: number; ships: Array<{id:string;owner:string;x:number;y:number;kind:string}> };
+type ExpansionCandidate={index:number;edge:number;pressure:number};
+type ActiveExpansion={id:string;owner:string;sent:number;launchIndex:number;candidates:ExpansionCandidate[];cursor:number;captured:number};
 const players = new Map<string, Player>();
 const clients = new Map<WebSocket, Client>();
 let tick=0,round=1,mapName='Continents',mapSeed=1,roundPlayerCount=0,finishing=false,playableTiles=0;
 let tiles:Tile[]=[],ships:Ship[]=[];
+const activeExpansions:ActiveExpansion[]=[];
 const dirtyTiles=new Set<number>(),persistentTiles=new Set<number>();
 let nextMatchTimer:ReturnType<typeof setTimeout>|null=null;
 function markTile(i:number){if(i>=0&&i<tiles.length){dirtyTiles.add(i);persistentTiles.add(i);}}
@@ -148,7 +151,7 @@ function freshWorld(randomMap = true) {
   mapSeed=Math.floor(Math.random()*1_000_000_000);
   tiles=makeMap(mapName,mapSeed);
   playableTiles=tiles.reduce((sum,t)=>sum+(t.terrain==='water'||t.terrain==='mountain'?0:1),0);
-  dirtyTiles.clear();persistentTiles.clear();ships=[];
+  dirtyTiles.clear();persistentTiles.clear();ships=[];activeExpansions.length=0;
   tick=0;
   const connected = [...players.values()].filter(p => p.connected).slice(0, MAX_PLAYERS);
   players.clear();
@@ -167,7 +170,7 @@ function state(): GameState {
 let saveQueue = Promise.resolve();
 function persistSnapshot(): Promise<void> {
   if (!supabase) return Promise.resolve();
-  const compactState={width:WIDTH,height:HEIGHT,tick,round,mapName,mapSeed,players:[...players.values()].map(p=>({...p,connected:false})),changes:[...persistentTiles].map(i=>[i,tiles[i]])};
+  const compactState={width:WIDTH,height:HEIGHT,tick,round,mapName,mapSeed,players:[...players.values()].map(p=>({...p,connected:false})),changes:[...persistentTiles].map(i=>[i,tiles[i]]),expansions:activeExpansions};
   const snapshot={id:'main',state:compactState,updated_at:new Date().toISOString()};
   saveQueue = saveQueue.then(async () => {
     const { error } = await supabase!.from('game_snapshots').upsert(snapshot);
@@ -185,6 +188,13 @@ async function restoreSnapshot(){
   tiles=makeMap(mapName,mapSeed);playableTiles=tiles.reduce((sum,t)=>sum+(t.terrain==='water'||t.terrain==='mountain'?0:1),0);persistentTiles.clear();dirtyTiles.clear();
   for(const entry of saved.changes){if(!Array.isArray(entry)||!Number.isInteger(entry[0])||entry[0]<0||entry[0]>=tiles.length||!entry[1])continue;const t=entry[1] as Tile;if(!['plain','forest','mountain','water'].includes(t.terrain)||(t.owner!==null&&typeof t.owner!=='string'))continue;tiles[entry[0]]={owner:t.owner,terrain:t.terrain,troops:Math.max(0,Number(t.troops)||0),buildings:Array.isArray(t.buildings)?t.buildings.filter(b=>['city','factory','port','defense_post','market','farm'].includes(b.type)):[]};persistentTiles.add(entry[0]);}
   players.clear();for(const p of saved.players)if(p&&typeof p.id==='string'&&typeof p.name==='string')players.set(p.id,{...p,connected:false,spawnPreference:p.spawnPreference||'auto',workerRatio:Number.isFinite(p.workerRatio)?p.workerRatio:30});
+  activeExpansions.length=0;
+  if(Array.isArray(saved.expansions))for(const expansion of saved.expansions.slice(0,100)){
+   if(!expansion||typeof expansion.owner!=='string'||!Array.isArray(expansion.candidates))continue;
+   const candidates=expansion.candidates.filter((v:any)=>v&&Number.isInteger(v.index)&&v.index>=0&&v.index<tiles.length&&Number.isFinite(v.edge)&&Number.isFinite(v.pressure)).slice(0,20000);
+   const cursor=Math.max(0,Math.min(candidates.length,Math.floor(Number(expansion.cursor)||0)));
+   if(candidates.length>cursor)activeExpansions.push({id:String(expansion.id||randomUUID()),owner:expansion.owner,sent:Math.max(0,Number(expansion.sent)||0),launchIndex:Math.max(0,Math.min(tiles.length-1,Number(expansion.launchIndex)||0)),candidates,cursor,captured:Math.max(0,Math.floor(Number(expansion.captured)||0))});
+  }
   roundPlayerCount=players.size;ships=[];console.log('Restored compact 1000x1000 frontier snapshot.');
  }catch(error){console.error('Could not restore saved frontier snapshot:',error);}
 }
@@ -292,9 +302,10 @@ function claim(client: Client, player: Player, message: any) {
   const target = tiles[targetIndex]!;
   if (target.owner === player.id) { send(client.socket,{type:'error',text:'That territory is already yours.'}); return; }
   if (target.terrain === 'mountain' || target.terrain === 'water') { send(client.socket,{type:'error',text:'Click a land region to set your expansion direction.'}); return; }
+  if(activeExpansions.filter(exp=>exp.owner===player.id).length>=2){
+    send(client.socket,{type:'error',text:'Your nation already has two expansion fronts moving. Let them advance first.'});return;
+  }
 
-  // Work out the whole nation's reserve and center. The click gives direction,
-  // while the server chooses the best-facing outer border automatically.
   const owned:number[]=[];
   let totalTroops=0,centerX=0,centerY=0;
   for(let i=0;i<tiles.length;i++){
@@ -330,20 +341,16 @@ function claim(client: Client, player: Player, message: any) {
     for(const i of owned){const d=Math.hypot(tx-i%WIDTH,ty-Math.floor(i/WIDTH));if(d<nearest){nearest=d;launchIndex=i;}}
   }
 
-  const percent = Math.max(1,Math.min(100,Math.floor(Number.isFinite(Number(message.percent))?Number(message.percent):25)));
-  const sent = Math.floor(totalTroops * percent / 100);
-  if (sent < 1) { send(client.socket,{type:'error',text:'Not enough troops are available for this expansion.'}); return; }
-
-  // Deduct proportionally from all land tiles; there is no selected source tile.
-  const withdrawal=sent/totalTroops;
-  for(const i of owned){tiles[i]!.troops=Math.max(0,tiles[i]!.troops*(1-withdrawal));markTile(i);}
+  const percent=Math.max(1,Math.min(100,Math.floor(Number.isFinite(Number(message.percent))?Number(message.percent):25)));
+  const sent=Math.floor(totalTroops*percent/100);
+  if(sent<1){send(client.socket,{type:'error',text:'Not enough troops are available for this expansion.'});return;}
 
   const sx=launchIndex%WIDTH,sy=Math.floor(launchIndex/WIDTH);
   const radius=Math.min(18,Math.max(2.5,1.7+Math.sqrt(sent)*.28));
   const extent=Math.ceil(radius*1.45),fieldSeed=mapSeed+launchIndex*17+targetIndex*31+sent*13;
   const minX=Math.max(0,sx-extent),maxX=Math.min(WIDTH-1,sx+extent);
   const minY=Math.max(0,sy-extent),maxY=Math.min(HEIGHT-1,sy+extent);
-  const candidates:{index:number;edge:number;pressure:number}[]=[];
+  const candidates:ExpansionCandidate[]=[];
   for(let y=minY;y<=maxY;y++)for(let x=minX;x<=maxX;x++){
     const rx=x-sx,ry=y-sy,forward=rx*dirX+ry*dirY,lateral=Math.abs(rx*dirY-ry*dirX);
     const normalized=Math.hypot(lateral/(radius*.86),(forward-radius*.13)/(radius*1.1));
@@ -354,30 +361,52 @@ function claim(client: Client, player: Player, message: any) {
     if(pressure>=1)candidates.push({index:y*WIDTH+x,edge:warped,pressure});
   }
   candidates.sort((a,b)=>a.edge-b.edge);
-  let captured=0;
-  for(const candidate of candidates){
-    const tile=tiles[candidate.index]!;
-    if(tile.terrain==='water'||tile.terrain==='mountain'||tile.owner===player.id)continue;
-    const defender=Math.ceil(tile.troops*((tile.buildings||[]).some(b=>b.type==='defense_post')?2:1));
-    const required=defender+1;
-    if(candidate.pressure<required){
-      if(tile.owner&&defender>0){tile.troops=Math.max(0,defender-Math.floor(candidate.pressure));markTile(candidate.index);}
-      continue;
-    }
-    if(tile.owner){const previous=players.get(tile.owner);if(previous)previous.score=Math.max(0,previous.score-1);}
-    tile.owner=player.id;tile.troops=Math.max(0,Math.floor(candidate.pressure-required));
-    player.score++;captured++;markTile(candidate.index);
-  }
-  if(!captured){
-    const refund=Math.floor(sent*.7),home=player.home>=0&&tiles[player.home]?.owner===player.id?player.home:launchIndex;
-    if(home>=0){tiles[home]!.troops+=refund;markTile(home);}
-  }
-  notify(captured
-    ? '🌐 '+player.name+' launched a '+percent+'% national expansion and captured '+captured+' land tiles.'
-    : '🛡 '+player.name+' tried to expand in a direction with no reachable land; most troops returned.');
+  if(!candidates.length){send(client.socket,{type:'error',text:'There is no reachable land in that direction.'});return;}
+
+  // Commit the whole-nation reserve now, then animate the border as the
+  // queued pressure field moves from the inner edge toward its outer edge.
+  const withdrawal=sent/totalTroops;
+  for(const i of owned){tiles[i]!.troops=Math.max(0,tiles[i]!.troops*(1-withdrawal));markTile(i);}
+  player.troopsTotal=Math.max(0,totalTroops-sent);
+  activeExpansions.push({id:randomUUID(),owner:player.id,sent,launchIndex,candidates,cursor:0,captured:0});
+  notify('🌐 '+player.name+' launched a '+percent+'% national expansion. The border is advancing.');
   broadcast();
   void persistSnapshot();
-  checkVictory();
+}
+function advanceExpansionFronts(){
+  if(!activeExpansions.length)return;
+  let changed=false,completed=false;
+  for(let e=activeExpansions.length-1;e>=0;e--){
+    const expansion=activeExpansions[e]!,player=players.get(expansion.owner);
+    if(!player){activeExpansions.splice(e,1);continue;}
+    const batch=Math.max(1,Math.ceil(expansion.candidates.length/36));
+    const end=Math.min(expansion.candidates.length,expansion.cursor+batch);
+    while(expansion.cursor<end){
+      const candidate=expansion.candidates[expansion.cursor++]!,tile=tiles[candidate.index]!;
+      if(tile.terrain==='water'||tile.terrain==='mountain'||tile.owner===expansion.owner)continue;
+      const defender=Math.ceil(tile.troops*((tile.buildings||[]).some(b=>b.type==='defense_post')?2:1));
+      const required=defender+1;
+      if(candidate.pressure<required){
+        if(tile.owner&&defender>0){tile.troops=Math.max(0,defender-Math.floor(candidate.pressure));markTile(candidate.index);changed=true;}
+        continue;
+      }
+      if(tile.owner){const previous=players.get(tile.owner);if(previous)previous.score=Math.max(0,previous.score-1);}
+      tile.owner=expansion.owner;tile.troops=Math.max(0,Math.floor(candidate.pressure-required));
+      player.score++;expansion.captured++;markTile(candidate.index);changed=true;
+    }
+    if(expansion.cursor>=expansion.candidates.length){
+      if(!expansion.captured){
+        const refund=Math.floor(expansion.sent*.7),home=player.home>=0&&tiles[player.home]?.owner===expansion.owner?player.home:expansion.launchIndex;
+        if(home>=0){tiles[home]!.troops+=refund;markTile(home);}
+        notify('🛡 '+player.name+'s expansion front ran out of strength; most troops returned.');
+      }else{
+        notify('🌎 '+player.name+'s border finished advancing and captured '+expansion.captured+' land tiles.');
+      }
+      activeExpansions.splice(e,1);completed=true;
+    }
+  }
+  if(changed)broadcast();
+  if(completed){checkVictory();void persistSnapshot();}
 }
 function checkVictory() {
   if (finishing || players.size < 1 || !playableTiles) return;
@@ -511,6 +540,7 @@ async function boot(){
  await restoreSnapshot();
  if(!tiles.length)freshWorld(true);
  else{for(const player of players.values()){player.connected=false;player.spawnPreference=player.spawnPreference||'auto';player.workerRatio=Number.isFinite(player.workerRatio)?player.workerRatio:30;player.territory=player.territory||0;player.troopsTotal=player.troopsTotal||0;player.troopMax=player.troopMax||0;}roundPlayerCount=players.size;}
+ setInterval(advanceExpansionFronts,150);
  setInterval(()=>{
   tick++;
   const summary=new Map<string,{land:number;troops:number;cityLevels:number;farms:number;income:number;home:number}>();
