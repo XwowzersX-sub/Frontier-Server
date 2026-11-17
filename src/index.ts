@@ -22,6 +22,7 @@ type Building = { type: BuildingType; level: number };
 type Tile = { owner: string | null; terrain: 'plain' | 'forest' | 'mountain' | 'water'; troops: number; buildings: Building[] };
 type Player = { id: string; name: string; color: string; gold: number; score: number; connected: boolean; home: number; spawnPreference: string; workerRatio?: number; territory?:number; troopsTotal?:number; troopMax?:number; troopRate?:number; goldRate?:number };
 type Client = { id: string; socket: WebSocket; joined: boolean; lastAction: number; loadedChunks: Set<string> };
+type StatIncrement = {gamesPlayed?:number;wins?:number;losses?:number;playTimeSeconds?:number;landClaimed?:number};
 type Ship = { id: string; owner: string; from: number; to: number; path: number[]; step: number; kind: 'colony'|'trade'; destinationOwner?: string };
 type MatchPhase='countdown'|'spawning'|'playing';
 type GameState = { width: number; height: number; players: Player[]; tick: number; round: number; mapName: string; mapSeed: number; playable: number; capacity: number; ships: Array<{id:string;owner:string;x:number;y:number;kind:string}>; expansions?:Array<{owner:string;tile:number;troops:number}>; phase:MatchPhase;countdownEndsAt:number;spawnEndsAt:number;serverTime:number };
@@ -35,6 +36,71 @@ let tiles:Tile[]=[],ships:Ship[]=[];
 const activeExpansions:ActiveExpansion[]=[];
 const dirtyTiles=new Set<number>(),persistentTiles=new Set<number>();
 let nextMatchTimer:ReturnType<typeof setTimeout>|null=null;
+const AUTH_USER_ID=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const roundParticipants=new Map<string,string>();
+const pendingLandClaimed=new Map<string,number>();
+const activePlaySessions=new Map<string,number>();
+let statsFlushRunning=false;
+function isAccountId(id:string){return AUTH_USER_ID.test(id);}
+async function recordFrontierStats(userId:string,increment:StatIncrement):Promise<boolean>{
+ if(!supabase||!isAccountId(userId))return false;
+ const {error}=await supabase.rpc('record_frontier_stats',{
+  p_user_id:userId,p_games_played:increment.gamesPlayed||0,p_wins:increment.wins||0,
+  p_losses:increment.losses||0,p_play_time_seconds:increment.playTimeSeconds||0,
+  p_land_claimed:increment.landClaimed||0
+ });
+ if(error){console.error('Leaderboard stat update failed:',error.message);return false;}
+ return true;
+}
+function trackAccountJoin(userId:string,name:string){
+ if(!isAccountId(userId))return;
+ roundParticipants.set(userId,name);
+ if(!activePlaySessions.has(userId))activePlaySessions.set(userId,Date.now());
+ if(supabase){
+  void (async()=>{
+   const clean=name.replace(/[^a-zA-Z0-9 _-]/g,'').trim().slice(0,18)||'Commander';
+   const first=await supabase!.from('profiles').upsert({id:userId,username:clean},{onConflict:'id'});
+   if(first.error&&first.error.code==='23505'){
+    const uniqueName=(clean.slice(0,14)+'-'+userId.slice(0,4)).slice(0,20);
+    const retry=await supabase!.from('profiles').upsert({id:userId,username:uniqueName},{onConflict:'id'});
+    if(retry.error)console.error('Could not update commander profile:',retry.error.message);
+   }else if(first.error)console.error('Could not update commander profile:',first.error.message);
+  })();
+ }
+}
+function addLandClaimed(userId:string,count:number){
+ if(!isAccountId(userId)||count<=0)return;
+ pendingLandClaimed.set(userId,(pendingLandClaimed.get(userId)||0)+Math.floor(count));
+}
+async function flushPlayerPlayTime(userId:string){
+ const last=activePlaySessions.get(userId);if(last===undefined)return;
+ const seconds=Math.floor((Date.now()-last)/1000);
+ if(seconds>0){
+  const saved=await recordFrontierStats(userId,{playTimeSeconds:seconds});
+  if(!saved)return;
+  activePlaySessions.set(userId,last+seconds*1000);
+ }
+ const stillConnected=[...clients.values()].some(client=>client.id===userId&&client.joined);
+ if(!stillConnected&&activePlaySessions.has(userId))activePlaySessions.delete(userId);
+}
+async function flushLeaderboardBuffers(){
+ if(statsFlushRunning)return;statsFlushRunning=true;
+ try{
+  for(const userId of [...activePlaySessions.keys()])await flushPlayerPlayTime(userId);
+  for(const [userId,count] of [...pendingLandClaimed.entries()]){
+   if(await recordFrontierStats(userId,{landClaimed:count})){
+    const remaining=(pendingLandClaimed.get(userId)||0)-count;
+    if(remaining>0)pendingLandClaimed.set(userId,remaining);else pendingLandClaimed.delete(userId);
+   }
+  }
+ }finally{statsFlushRunning=false;}
+}
+async function persistRoundResults(winnerId:string){
+ await flushLeaderboardBuffers();
+ for(const [userId] of roundParticipants){
+  await recordFrontierStats(userId,{gamesPlayed:1,wins:userId===winnerId?1:0,losses:userId===winnerId?0:1});
+ }
+}
 function markTile(i:number){if(i>=0&&i<tiles.length){dirtyTiles.add(i);persistentTiles.add(i);}}
 function chunkKey(cx:number,cy:number){return cx+':'+cy;}
 function chunkKeyForTile(i:number){return chunkKey(Math.floor((i%WIDTH)/CHUNK_SIZE),Math.floor(Math.floor(i/WIDTH)/CHUNK_SIZE));}
@@ -130,6 +196,7 @@ function spawn(player:Player,center?:number):boolean {
   const blob=getSpawnBlob(chosen);
   if(!blob){if(center!==undefined)return false;chosen=undefined;continue;}
   player.home=chosen;player.territory=blob.length;player.troopsTotal=36;player.troopMax=Math.floor(2*(Math.pow(Math.max(1,blob.length),.6)+50));
+  addLandClaimed(player.id,blob.length);
   for(const tileIndex of blob){const tile=tiles[tileIndex]!;tile.owner=player.id;tile.troops=tileIndex===chosen?36:0;tile.buildings=[];markTile(tileIndex);}
   return true;
  }
@@ -149,10 +216,11 @@ function freshWorld(randomMap = true) {
   playableTiles=tiles.reduce((sum,t)=>sum+(t.terrain==='water'?0:1),0);
   dirtyTiles.clear();persistentTiles.clear();ships=[];activeExpansions.length=0;tick=0;
   const connected=[...players.values()].filter(p=>p.connected).slice(0,MAX_PLAYERS);
-  players.clear();
+  players.clear();roundParticipants.clear();
   connected.forEach((p,slot)=>{
    p.gold=160;p.score=0;p.home=-1;p.color=colorFor(slot);p.territory=0;p.troopsTotal=0;p.troopMax=0;p.troopRate=0;p.goldRate=1;
    players.set(p.id,p);
+   if(isAccountId(p.id))roundParticipants.set(p.id,p.name);
   });
   roundPlayerCount=players.size;finishing=false;
   matchPhase='countdown';countdownEndsAt=connected.length?Date.now()+60000:0;spawnEndsAt=0;
@@ -235,6 +303,7 @@ function join(client:Client,requestedName?:string,requestedPreference?:string){
   if(matchPhase==='playing'&&player.home<0)spawn(player);
  }
  client.joined=true;
+ trackAccountJoin(client.id,player.name);
  send(client.socket,{type:'welcome',id:client.id});
  broadcast();void persistSnapshot();
 }
@@ -391,6 +460,7 @@ function advanceExpansionFronts(){
    expansion.remaining-=cost;
    if(tile.owner){const previous=players.get(tile.owner);if(previous)previous.score=Math.max(0,previous.score-1);}
    tile.owner=expansion.owner;tile.troops=Math.max(0,Math.floor(Math.min(1,expansion.remaining*.025)));
+   addLandClaimed(expansion.owner,1);
    player.score++;expansion.captured++;markTile(candidate.index);changed=true;
   }
   if(expansion.cursor>=expansion.candidates.length){
@@ -419,6 +489,7 @@ function checkVictory() {
     finishing = true;
     const reason = winner ? 'controlled 80% of the playable world' : 'is the last commander standing';
     notify('🏆 ' + champion.name + ' won Round ' + round + ' — ' + reason + '. A new random map is loading.');
+    void persistRoundResults(champion.id);
     void persistSnapshot();
     nextMatchTimer = setTimeout(() => {
       round++;
@@ -534,6 +605,7 @@ http.on('upgrade', async (req,socket,head) => {
         if (!stillConnected) {
           const player = players.get(id);
           if (player) {
+            void flushPlayerPlayTime(id);
             players.delete(id);
             for (let i=0;i<tiles.length;i++) if (tiles[i]!.owner===id) { tiles[i]!.owner=null;tiles[i]!.troops=0;tiles[i]!.buildings=[];markTile(i); }
             if (player.connected) notify('↘ ' + player.name + ' left the frontier.');
@@ -563,6 +635,7 @@ async function boot(){
   }
  },250);
  setInterval(()=>{if(matchPhase!=='playing')return;advanceExpansionFronts();},125);
+ setInterval(()=>{void flushLeaderboardBuffers();},60000);
  setInterval(()=>{
   if(matchPhase!=='playing')return;
   tick++;
@@ -604,7 +677,7 @@ async function boot(){
    if(ship.step>=ship.path.length-1){
     const target=tiles[ship.to]!;
     if(ship.kind==='colony'&&target.owner===null&&target.terrain!=='water'&&target.terrain!=='mountain'){
-     target.owner=ship.owner;target.troops=1;markTile(ship.to);
+     target.owner=ship.owner;target.troops=1;markTile(ship.to);addLandClaimed(ship.owner,1);
      const owner=players.get(ship.owner);if(owner){owner.score++;notify('🏝 '+owner.name+' founded a new island settlement.');}
     }else if(ship.kind==='trade'){
      const from=players.get(ship.owner),to=ship.destinationOwner?players.get(ship.destinationOwner):from;
@@ -627,5 +700,5 @@ async function boot(){
  },TICK_MS);
  http.listen(port,'0.0.0.0',()=>console.log('Frontier 1000x1000 chunked world server listening on '+port));
 }
-process.on('SIGTERM', async () => { if(nextMatchTimer)clearTimeout(nextMatchTimer);await persistSnapshot();http.close(() => process.exit(0)); });
+process.on('SIGTERM', async () => { if(nextMatchTimer)clearTimeout(nextMatchTimer);await flushLeaderboardBuffers();await persistSnapshot();http.close(() => process.exit(0)); });
 void boot();
