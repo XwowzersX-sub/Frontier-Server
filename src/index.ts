@@ -372,7 +372,7 @@ function advanceExpansionFronts(){
   const expansion=activeExpansions[e]!,player=players.get(expansion.owner);
   if(!player){activeExpansions.splice(e,1);continue;}
   const strength=expansion.targetOwner?Math.max(.6,Math.min(2,expansion.defenderTroops/Math.max(1,expansion.sent))):1;
-  const batch=Math.max(1,Math.min(5,Math.ceil(expansion.frontWidth/(1+strength))));
+  const batch=Math.max(2,Math.min(12,Math.ceil(expansion.frontWidth/(1+strength)*1.8)));
   const end=Math.min(expansion.candidates.length,expansion.cursor+batch);
   while(expansion.cursor<end){
    const candidate=expansion.candidates[expansion.cursor++]!,tile=tiles[candidate.index]!;
@@ -560,7 +560,7 @@ async function boot(){
    broadcast();void persistSnapshot();
   }
  },250);
- setInterval(()=>{if(matchPhase!=='playing')return;advanceExpansionFronts();},250);
+ setInterval(()=>{if(matchPhase!=='playing')return;advanceExpansionFronts();},125);
  setInterval(()=>{
   if(matchPhase!=='playing')return;
   tick++;
