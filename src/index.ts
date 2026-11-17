@@ -444,7 +444,8 @@ function advanceExpansionFronts(){
   const strength=expansion.targetOwner?Math.max(.6,Math.min(2,expansion.defenderTroops/Math.max(1,expansion.sent))):1;
   // Unclaimed settlement growth advances as a broad connected wave; contested land keeps its current progression.
   const settlementSweep=expansion.targetOwner===null;
-  const batch=settlementSweep?Math.min(expansion.candidates.length-expansion.cursor,Math.max(96,Math.min(288,Math.ceil(expansion.frontWidth*10)))):Math.max(2,Math.min(12,Math.ceil(expansion.frontWidth/(1+strength)*1.8)));
+  // Small, frequent steps make the frontier read as a continuous flow instead of a single large fill.
+  const batch=settlementSweep?Math.min(expansion.candidates.length-expansion.cursor,Math.max(6,Math.min(16,Math.ceil(expansion.frontWidth*.03)))):Math.max(3,Math.min(6,Math.ceil(expansion.frontWidth/(1+strength)*.8)));
   const end=Math.min(expansion.candidates.length,expansion.cursor+batch);
   while(expansion.cursor<end){
    const candidate=expansion.candidates[expansion.cursor++]!,tile=tiles[candidate.index]!;
@@ -461,13 +462,14 @@ function advanceExpansionFronts(){
    expansion.remaining-=cost;
    if(tile.owner){const previous=players.get(tile.owner);if(previous)previous.score=Math.max(0,previous.score-1);}
    tile.owner=expansion.owner;tile.troops=Math.max(0,Math.floor(Math.min(1,expansion.remaining*.025)));
+   player.troopsTotal=Math.max(0,(player.troopsTotal||0)+tile.troops);
    addLandClaimed(expansion.owner,1);
    player.score++;expansion.captured++;markTile(candidate.index);changed=true;
   }
   if(expansion.cursor>=expansion.candidates.length){
    const home=player.home>=0&&tiles[player.home]?.owner===expansion.owner?player.home:expansion.launchIndex;
    const refund=expansion.captured?Math.floor(expansion.remaining*.8):Math.floor(expansion.sent*.7);
-   if(refund>0&&home>=0){tiles[home]!.troops+=refund;markTile(home);}
+   if(refund>0&&home>=0){tiles[home]!.troops+=refund;player.troopsTotal=Math.max(0,(player.troopsTotal||0)+refund);markTile(home);}
    if(!expansion.captured)notify('🛡 '+player.name+'s attack front could not break through that territory.');
    else notify('🌎 '+player.name+'s border finished advancing and captured '+expansion.captured+' tiles.');
    activeExpansions.splice(e,1);completed=true;
@@ -524,11 +526,16 @@ function command(client: Client, raw: string) {
   if(message.type==='workers'){const now=Date.now();if(now-client.lastAction<140)return;client.lastAction=now;player.workerRatio=Math.max(0,Math.min(100,Math.floor(Number(message.ratio)||0)));broadcast();return;}
   const now = Date.now(); if (now - client.lastAction < 180) return; client.lastAction = now;
   if (message.type === 'recruit') {
-    if (player.gold < 25) { send(client.socket,{type:'error',text:'You need 25 gold to recruit.'}); return; }
     const homeTile = tiles[player.home];
     const target = homeTile?.owner === player.id ? player.home : tiles.findIndex(t=>t.owner===player.id);
     if (target === undefined || target < 0) return;
-    player.gold -= 25; tiles[target]!.troops += 15; markTile(target); notify('＋ ' + player.name + ' recruited 15 troops.'); broadcast(); void persistSnapshot(); return;
+    const troopRoom=Math.max(0,(player.troopMax||0)-(player.troopsTotal||0));
+    const amount=Math.min(15,troopRoom);
+    if(amount<=0){send(client.socket,{type:'error',text:'Your troop bar is full. Expand your capacity before recruiting more.'});return;}
+    const cost=Math.ceil(25*amount/15);
+    if(player.gold<cost){send(client.socket,{type:'error',text:'You need '+cost+' gold to recruit.'});return;}
+    player.gold-=cost;tiles[target]!.troops+=amount;player.troopsTotal=(player.troopsTotal||0)+amount;markTile(target);
+    notify('＋ '+player.name+' recruited '+amount+' troops.');broadcast();void persistSnapshot();return;
   }
   if(message.type==='boat'&&Number.isInteger(message.source)&&Number.isInteger(message.target)){
     const sourceIndex=Number(message.source),targetIndex=Number(message.target);
@@ -635,16 +642,16 @@ async function boot(){
    broadcast();void persistSnapshot();
   }
  },250);
- setInterval(()=>{if(matchPhase!=='playing')return;advanceExpansionFronts();},125);
+ setInterval(()=>{if(matchPhase!=='playing')return;advanceExpansionFronts();},60);
  setInterval(()=>{void flushLeaderboardBuffers();},60000);
  setInterval(()=>{
   if(matchPhase!=='playing')return;
   tick++;
-  const summary=new Map<string,{land:number;troops:number;cityLevels:number;farms:number;income:number;home:number}>();
-  for(const player of players.values())summary.set(player.id,{land:0,troops:0,cityLevels:0,farms:0,income:0,home:-1});
+  const summary=new Map<string,{land:number;troops:number;cityLevels:number;farms:number;income:number;home:number;owned:number[]}>();
+  for(const player of players.values())summary.set(player.id,{land:0,troops:0,cityLevels:0,farms:0,income:0,home:-1,owned:[]});
   for(let i=0;i<tiles.length;i++){
    const tile=tiles[i]!,stats=tile.owner?summary.get(tile.owner):undefined;if(!stats)continue;
-   stats.land++;stats.troops+=tile.troops;if(stats.home<0)stats.home=i;
+   stats.land++;stats.troops+=tile.troops;stats.owned.push(i);if(stats.home<0)stats.home=i;
    for(const building of tile.buildings||[]){
     if(building.type==='city'){stats.cityLevels+=building.level;stats.income+=building.level*2;}
     if(building.type==='factory')stats.income+=3;
@@ -659,6 +666,14 @@ async function boot(){
    // Resource values are scaled down by 1,000 versus OpenFront so Frontier's
    // existing building prices remain meaningful.
    const maxTroops=Math.floor(2*(Math.pow(Math.max(1,stats.land),.6)+50)+stats.cityLevels*250);
+   // Enforce the national troop cap even if older saves or manual actions left an army over limit.
+   if(stats.troops>maxTroops){
+    const overflowStart=stats.troops-maxTroops;let overflow=overflowStart;
+    const preferredHome=player.home>=0&&tiles[player.home]?.owner===player.id?player.home:stats.home;
+    if(preferredHome>=0){const tile=tiles[preferredHome]!;const removed=Math.min(overflow,tile.troops);tile.troops-=removed;overflow-=removed;markTile(preferredHome);}
+    for(const tileIndex of stats.owned){if(overflow<=0)break;if(tileIndex===preferredHome)continue;const tile=tiles[tileIndex]!;const removed=Math.min(overflow,tile.troops);if(removed>0){tile.troops-=removed;overflow-=removed;markTile(tileIndex);}}
+    stats.troops-=overflowStart-overflow;
+   }
    const baseGoldPerSecond=1;
    const baseTroopRate=(.01+Math.pow(Math.max(0,stats.troops),.73)/(4*Math.pow(1000,.27)))*10*1.35;
    const troopRate=Math.max(0,baseTroopRate*(1-stats.troops/Math.max(1,maxTroops)))*(1+Math.min(12,stats.farms)*.10);
@@ -679,7 +694,7 @@ async function boot(){
     const target=tiles[ship.to]!;
     if(ship.kind==='colony'&&target.owner===null&&target.terrain!=='water'&&target.terrain!=='mountain'){
      target.owner=ship.owner;target.troops=1;markTile(ship.to);addLandClaimed(ship.owner,1);
-     const owner=players.get(ship.owner);if(owner){owner.score++;notify('🏝 '+owner.name+' founded a new island settlement.');}
+     const owner=players.get(ship.owner);if(owner){owner.score++;owner.troopsTotal=Math.max(0,(owner.troopsTotal||0)+1);notify('🏝 '+owner.name+' founded a new island settlement.');}
     }else if(ship.kind==='trade'){
      const from=players.get(ship.owner),to=ship.destinationOwner?players.get(ship.destinationOwner):from;
      const payout=Math.min(250,Math.max(20,Math.floor(ship.path.length*.3)));
