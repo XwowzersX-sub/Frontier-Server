@@ -96,8 +96,9 @@ async function flushLeaderboardBuffers(){
  }finally{statsFlushRunning=false;}
 }
 async function persistRoundResults(winnerId:string){
+ const participants=[...roundParticipants.keys()];
  await flushLeaderboardBuffers();
- for(const [userId] of roundParticipants){
+ for(const userId of participants){
   await recordFrontierStats(userId,{gamesPlayed:1,wins:userId===winnerId?1:0,losses:userId===winnerId?0:1});
  }
 }
@@ -605,7 +606,7 @@ http.on('upgrade', async (req,socket,head) => {
         if (!stillConnected) {
           const player = players.get(id);
           if (player) {
-            void flushPlayerPlayTime(id);
+            void flushLeaderboardBuffers();
             players.delete(id);
             for (let i=0;i<tiles.length;i++) if (tiles[i]!.owner===id) { tiles[i]!.owner=null;tiles[i]!.troops=0;tiles[i]!.buildings=[];markTile(i); }
             if (player.connected) notify('↘ ' + player.name + ' left the frontier.');
