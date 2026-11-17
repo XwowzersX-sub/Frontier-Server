@@ -462,8 +462,8 @@ function advanceExpansionFronts(){
     expansion.remaining=0;expansion.cursor=expansion.candidates.length;break;
    }
    expansion.remaining-=cost;
-   if(tile.owner){const previous=players.get(tile.owner);if(previous)previous.score=Math.max(0,previous.score-1);}
-   tile.owner=expansion.owner;tile.troops=Math.max(0,Math.floor(Math.min(1,expansion.remaining*.025)));
+   if(tile.owner){const previous=players.get(tile.owner);if(previous){previous.score=Math.max(0,previous.score-1);previous.territory=Math.max(0,(previous.territory||0)-1);}}
+   tile.owner=expansion.owner;player.territory=Math.max(0,(player.territory||0)+1);tile.troops=Math.max(0,Math.floor(Math.min(1,expansion.remaining*.025)));
    player.troopsTotal=Math.max(0,(player.troopsTotal||0)+tile.troops);
    addLandClaimed(expansion.owner,1);
    player.score++;expansion.captured++;markTile(candidate.index);changed=true;
@@ -696,7 +696,7 @@ async function boot(){
     const target=tiles[ship.to]!;
     if(ship.kind==='colony'&&target.owner===null&&target.terrain!=='water'&&target.terrain!=='mountain'){
      target.owner=ship.owner;target.troops=1;markTile(ship.to);addLandClaimed(ship.owner,1);
-     const owner=players.get(ship.owner);if(owner){owner.score++;owner.troopsTotal=Math.max(0,(owner.troopsTotal||0)+1);notify('🏝 '+owner.name+' founded a new island settlement.');}
+     const owner=players.get(ship.owner);if(owner){owner.score++;owner.territory=Math.max(0,(owner.territory||0)+1);owner.troopsTotal=Math.max(0,(owner.troopsTotal||0)+1);notify('🏝 '+owner.name+' founded a new island settlement.');}
     }else if(ship.kind==='trade'){
      const from=players.get(ship.owner),to=ship.destinationOwner?players.get(ship.destinationOwner):from;
      const payout=Math.min(250,Math.max(20,Math.floor(ship.path.length*.3)));
