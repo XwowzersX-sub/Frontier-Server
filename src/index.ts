@@ -23,12 +23,14 @@ type Tile = { owner: string | null; terrain: 'plain' | 'forest' | 'mountain' | '
 type Player = { id: string; name: string; color: string; gold: number; score: number; connected: boolean; home: number; spawnPreference: string; workerRatio?: number; territory?:number; troopsTotal?:number; troopMax?:number; troopRate?:number; goldRate?:number };
 type Client = { id: string; socket: WebSocket; joined: boolean; lastAction: number; loadedChunks: Set<string> };
 type Ship = { id: string; owner: string; from: number; to: number; path: number[]; step: number; kind: 'colony'|'trade'; destinationOwner?: string };
-type GameState = { width: number; height: number; players: Player[]; tick: number; round: number; mapName: string; mapSeed: number; playable: number; capacity: number; ships: Array<{id:string;owner:string;x:number;y:number;kind:string}>; expansions?:Array<{owner:string;tile:number;troops:number}> };
+type MatchPhase='countdown'|'spawning'|'playing';
+type GameState = { width: number; height: number; players: Player[]; tick: number; round: number; mapName: string; mapSeed: number; playable: number; capacity: number; ships: Array<{id:string;owner:string;x:number;y:number;kind:string}>; expansions?:Array<{owner:string;tile:number;troops:number}>; phase:MatchPhase;countdownEndsAt:number;spawnEndsAt:number;serverTime:number };
 type ExpansionCandidate={index:number;edge:number;pressure:number};
 type ActiveExpansion={id:string;owner:string;sent:number;remaining:number;launchIndex:number;candidates:ExpansionCandidate[];cursor:number;captured:number};
 const players = new Map<string, Player>();
 const clients = new Map<WebSocket, Client>();
 let tick=0,round=1,mapName='Continents',mapSeed=1,roundPlayerCount=0,finishing=false,playableTiles=0;
+let matchPhase:MatchPhase='countdown',countdownEndsAt=0,spawnEndsAt=0,restoredPhaseSnapshot=false;
 let tiles:Tile[]=[],ships:Ship[]=[];
 const activeExpansions:ActiveExpansion[]=[];
 const dirtyTiles=new Set<number>(),persistentTiles=new Set<number>();
@@ -107,70 +109,61 @@ function neighbors(i: number) {
     .filter(([a,b]) => a! >= 0 && a! < WIDTH && b! >= 0 && b! < HEIGHT)
     .map(([a,b]) => index(a!,b!));
 }
-function spawnSites() {
-  const sites: number[] = [];
-  const cols = 10, rows = 5;
-  for (let row = 0; row < rows; row++) for (let col = 0; col < cols; col++) {
-    const x = Math.round(12 + col * (WIDTH - 24) / (cols - 1));
-    const y = Math.round(10 + row * (HEIGHT - 20) / (rows - 1));
-    sites.push(index(x,y));
-  }
-  return sites;
+function getSpawnBlob(center:number):number[]|null {
+ if(!Number.isInteger(center)||center<0||center>=tiles.length)return null;
+ const sx=center%WIDTH,sy=Math.floor(center/WIDTH),blob:number[]=[];
+ for(let y=Math.max(0,sy-4);y<=Math.min(HEIGHT-1,sy+4);y++)for(let x=Math.max(0,sx-4);x<=Math.min(WIDTH-1,sx+4);x++){
+  const dx=x-(sx-.5),dy=y-(sy-.5);if(dx*dx+dy*dy>16)continue;
+  const i=index(x,y),tile=tiles[i]!;
+  if(tile.owner!==null||tile.terrain==='water'||tile.terrain==='mountain')return null;
+  blob.push(i);
+ }
+ return blob.length>=35?blob:null;
 }
-function preferencePoint(pref: string): [number,number] {
-  const points: Record<string,[number,number]> = {
-    northwest:[.16,.16], north:[.5,.12], northeast:[.84,.16],
-    west:[.12,.5], center:[.5,.5], east:[.88,.5],
-    southwest:[.16,.84], south:[.5,.88], southeast:[.84,.84]
-  };
-  return points[pref] || [.5,.5];
+function spawn(player:Player,center?:number):boolean {
+ const occupied=[...players.values()].filter(other=>other.id!==player.id&&other.home>=0).map(other=>other.home);
+ let chosen=center;
+ for(let attempt=0;attempt<(center===undefined?5000:1);attempt++){
+  if(chosen===undefined)chosen=index(8+Math.floor(Math.random()*(WIDTH-16)),8+Math.floor(Math.random()*(HEIGHT-16)));
+  const sx=chosen%WIDTH,sy=Math.floor(chosen/WIDTH);
+  if(occupied.some(home=>Math.hypot(sx-home%WIDTH,sy-Math.floor(home/WIDTH))<22)){if(center!==undefined)return false;chosen=undefined;continue;}
+  const blob=getSpawnBlob(chosen);
+  if(!blob){if(center!==undefined)return false;chosen=undefined;continue;}
+  player.home=chosen;player.territory=blob.length;player.troopsTotal=36;player.troopMax=Math.floor(2*(Math.pow(Math.max(1,blob.length),.6)+50));
+  for(const tileIndex of blob){const tile=tiles[tileIndex]!;tile.owner=player.id;tile.troops=tileIndex===chosen?36:0;tile.buildings=[];markTile(tileIndex);}
+  return true;
+ }
+ return false;
 }
-function spawn(player: Player, used: Set<number>) {
-  const sites = spawnSites().filter(site => !used.has(site));
-  const [px,py] = preferencePoint(player.spawnPreference);
-  sites.sort((a,b) => {
-    const ax = (a % WIDTH) / WIDTH, ay = Math.floor(a / WIDTH) / HEIGHT;
-    const bx = (b % WIDTH) / WIDTH, by = Math.floor(b / WIDTH) / HEIGHT;
-    return (ax-px)**2 + (ay-py)**2 - ((bx-px)**2 + (by-py)**2);
-  });
-  let chosen = sites[0] ?? index(10,10);
-  const sx = chosen % WIDTH, sy = Math.floor(chosen / WIDTH);
-  for (let dy = -3; dy <= 3; dy++) for (let dx = -3; dx <= 3; dx++) {
-    const x = sx + dx, y = sy + dy;
-    if (x < 2 || y < 2 || x >= WIDTH - 2 || y >= HEIGHT - 2) continue;
-    const tile = tiles[index(x,y)]!;
-    if (tile.terrain === 'water' || tile.terrain === 'mountain') tile.terrain = 'plain';
-  }
-  used.add(chosen);
-  player.home=chosen;player.territory=1;player.troopsTotal=36;player.troopMax=102;
-  tiles[chosen]={owner:player.id,terrain:'plain',troops:36,buildings:[]};
-  for(let dy=-3;dy<=3;dy++)for(let dx=-3;dx<=3;dx++){const x=sx+dx,y=sy+dy;if(x>=0&&x<WIDTH&&y>=0&&y<HEIGHT)markTile(index(x,y));}
+function maybeFinishSpawnPhase(){
+ if(matchPhase!=='spawning')return;
+ const active=[...players.values()].filter(player=>player.connected);
+ if(active.length&&active.every(player=>player.home>=0)){
+  matchPhase='playing';spawnEndsAt=0;notify('🌎 All commanders are placed. The match has begun!');broadcast();void persistSnapshot();
+ }
 }
 function freshWorld(randomMap = true) {
   mapName=randomMap?MAPS[Math.floor(Math.random()*MAPS.length)]!:mapName;
   mapSeed=Math.floor(Math.random()*1_000_000_000);
   tiles=makeMap(mapName,mapSeed);
   playableTiles=tiles.reduce((sum,t)=>sum+(t.terrain==='water'||t.terrain==='mountain'?0:1),0);
-  dirtyTiles.clear();persistentTiles.clear();ships=[];activeExpansions.length=0;
-  tick=0;
-  const connected = [...players.values()].filter(p => p.connected).slice(0, MAX_PLAYERS);
+  dirtyTiles.clear();persistentTiles.clear();ships=[];activeExpansions.length=0;tick=0;
+  const connected=[...players.values()].filter(p=>p.connected).slice(0,MAX_PLAYERS);
   players.clear();
-  connected.forEach((p,slot) => {
-    p.gold = 160; p.score = 0; p.home = -1; p.color = colorFor(slot);p.territory=0;p.troopsTotal=0;p.troopMax=0;p.troopRate=0;p.goldRate=1;
-    players.set(p.id,p);
+  connected.forEach((p,slot)=>{
+   p.gold=160;p.score=0;p.home=-1;p.color=colorFor(slot);p.territory=0;p.troopsTotal=0;p.troopMax=0;p.troopRate=0;p.goldRate=1;
+   players.set(p.id,p);
   });
-  const used = new Set<number>();
-  for (const p of players.values()) spawn(p,used);
-  roundPlayerCount = players.size;
-  finishing = false;
+  roundPlayerCount=players.size;finishing=false;
+  matchPhase='countdown';countdownEndsAt=connected.length?Date.now()+60000:0;spawnEndsAt=0;
 }
 function state(): GameState {
-  return {width:WIDTH,height:HEIGHT,players:[...players.values()].map(p=>({...p})),tick,round,mapName,mapSeed,playable:playableTiles,capacity:MAX_PLAYERS,ships:ships.map(s=>{const i=s.path[Math.min(s.step,s.path.length-1)]??s.from;return{id:s.id,owner:s.owner,x:i%WIDTH,y:Math.floor(i/WIDTH),kind:s.kind};}),expansions:activeExpansions.map(exp=>({owner:exp.owner,tile:exp.candidates[Math.min(exp.cursor,exp.candidates.length-1)]?.index??exp.launchIndex,troops:Math.max(0,Math.ceil(exp.remaining))}))};
+  return {width:WIDTH,height:HEIGHT,players:[...players.values()].map(p=>({...p})),tick,round,mapName,mapSeed,playable:playableTiles,capacity:MAX_PLAYERS,ships:ships.map(s=>{const i=s.path[Math.min(s.step,s.path.length-1)]??s.from;return{id:s.id,owner:s.owner,x:i%WIDTH,y:Math.floor(i/WIDTH),kind:s.kind};}),expansions:activeExpansions.map(exp=>({owner:exp.owner,tile:exp.candidates[Math.min(exp.cursor,exp.candidates.length-1)]?.index??exp.launchIndex,troops:Math.max(0,Math.ceil(exp.remaining))})),phase:matchPhase,countdownEndsAt,spawnEndsAt,serverTime:Date.now()};
 }
 let saveQueue = Promise.resolve();
 function persistSnapshot(): Promise<void> {
   if (!supabase) return Promise.resolve();
-  const compactState={width:WIDTH,height:HEIGHT,tick,round,mapName,mapSeed,players:[...players.values()].map(p=>({...p,connected:false})),changes:[...persistentTiles].map(i=>[i,tiles[i]]),expansions:activeExpansions};
+  const compactState={width:WIDTH,height:HEIGHT,tick,round,mapName,mapSeed,phase:matchPhase,countdownEndsAt,spawnEndsAt,players:[...players.values()].map(p=>({...p,connected:false})),changes:[...persistentTiles].map(i=>[i,tiles[i]]),expansions:activeExpansions};
   const snapshot={id:'main',state:compactState,updated_at:new Date().toISOString()};
   saveQueue = saveQueue.then(async () => {
     const { error } = await supabase!.from('game_snapshots').upsert(snapshot);
@@ -185,6 +178,7 @@ async function restoreSnapshot(){
   const saved=data?.state as any;
   if(!saved||saved.width!==WIDTH||saved.height!==HEIGHT||!Array.isArray(saved.players)||!Array.isArray(saved.changes)||!Number.isFinite(saved.mapSeed))return;
   tick=Number.isFinite(saved.tick)?saved.tick:0;round=Math.max(1,Number(saved.round)||1);mapName=MAPS.includes(saved.mapName)?saved.mapName:'Continents';mapSeed=Number(saved.mapSeed);
+  if(saved.phase==='countdown'||saved.phase==='spawning'||saved.phase==='playing'){restoredPhaseSnapshot=true;matchPhase=saved.phase;countdownEndsAt=Math.max(0,Number(saved.countdownEndsAt)||0);spawnEndsAt=Math.max(0,Number(saved.spawnEndsAt)||0);}
   tiles=makeMap(mapName,mapSeed);playableTiles=tiles.reduce((sum,t)=>sum+(t.terrain==='water'||t.terrain==='mountain'?0:1),0);persistentTiles.clear();dirtyTiles.clear();
   for(const entry of saved.changes){if(!Array.isArray(entry)||!Number.isInteger(entry[0])||entry[0]<0||entry[0]>=tiles.length||!entry[1])continue;const t=entry[1] as Tile;if(!['plain','forest','mountain','water'].includes(t.terrain)||(t.owner!==null&&typeof t.owner!=='string'))continue;tiles[entry[0]]={owner:t.owner,terrain:t.terrain,troops:Math.max(0,Number(t.troops)||0),buildings:Array.isArray(t.buildings)?t.buildings.filter(b=>['city','factory','port','defense_post','market','farm'].includes(b.type)):[]};persistentTiles.add(entry[0]);}
   players.clear();for(const p of saved.players)if(p&&typeof p.id==='string'&&typeof p.name==='string')players.set(p.id,{...p,connected:false,spawnPreference:p.spawnPreference||'auto',workerRatio:Number.isFinite(p.workerRatio)?p.workerRatio:30});
@@ -224,31 +218,25 @@ async function verify(token?: string) {
   const { data, error } = await supabase.auth.getUser(token);
   return error ? null : data.user;
 }
-function join(client: Client, requestedName?: string, requestedPreference?: string) {
-  if (client.joined) return;
-  let player = players.get(client.id);
-  if (!player && players.size >= MAX_PLAYERS) {
-    send(client.socket,{type:'error',text:'This live match is full (50/50). Try the next round.'});
-    return;
-  }
-  const preference = ['northwest','north','northeast','west','center','east','southwest','south','southeast'].includes(requestedPreference || '') ? requestedPreference! : 'auto';
-  if (!player) {
-    const name = (requestedName || 'Commander').replace(/[^a-zA-Z0-9 _-]/g, '').trim().slice(0, 18) || 'Commander';
-    player = { id: client.id, name, color: colorFor(players.size), gold: 160, score: 0, connected: true, home: -1, spawnPreference: preference, workerRatio:30, territory:0, troopsTotal:0, troopMax:0, troopRate:0, goldRate:1 };
-    players.set(client.id, player);
-    roundPlayerCount = Math.max(roundPlayerCount, players.size);
-    const used = new Set([...players.values()].filter(p=>p.id!==player!.id).map(p=>p.home).filter(h=>h>=0));
-    spawn(player,used);
-    notify('✦ ' + name + ' joined the live match (' + players.size + '/' + MAX_PLAYERS + ').');
-  } else {
-    player.connected = true;
-    const updatedName = (requestedName || '').replace(/[^a-zA-Z0-9 _-]/g,'').trim().slice(0,18);
-    if (updatedName) player.name = updatedName;
-  }
-  client.joined = true;
-  send(client.socket, { type: 'welcome', id: client.id });
-  broadcast();
-  void persistSnapshot();
+function join(client:Client,requestedName?:string,requestedPreference?:string){
+ if(client.joined)return;
+ let player=players.get(client.id);
+ if(!player&&players.size>=MAX_PLAYERS){send(client.socket,{type:'error',text:'This live match is full (50/50). Try the next round.'});return;}
+ const preference=['northwest','north','northeast','west','center','east','southwest','south','southeast'].includes(requestedPreference||'')?requestedPreference!:'auto';
+ if(!player){
+  const name=(requestedName||'Commander').replace(/[^a-zA-Z0-9 _-]/g,'').trim().slice(0,18)||'Commander';
+  player={id:client.id,name,color:colorFor(players.size),gold:160,score:0,connected:true,home:-1,spawnPreference:preference,workerRatio:30,territory:0,troopsTotal:0,troopMax:0,troopRate:0,goldRate:1};
+  players.set(client.id,player);roundPlayerCount=Math.max(roundPlayerCount,players.size);
+  if(matchPhase==='countdown'&&countdownEndsAt===0)countdownEndsAt=Date.now()+60000;
+  if(matchPhase==='playing')spawn(player);
+  notify('✦ '+name+' joined the '+(matchPhase==='countdown'?'waiting lobby':matchPhase==='spawning'?'spawn phase':'live match')+' ('+players.size+'/'+MAX_PLAYERS+').');
+ }else{
+  player.connected=true;const updatedName=(requestedName||'').replace(/[^a-zA-Z0-9 _-]/g,'').trim().slice(0,18);if(updatedName)player.name=updatedName;
+  if(matchPhase==='playing'&&player.home<0)spawn(player);
+ }
+ client.joined=true;
+ send(client.socket,{type:'welcome',id:client.id});
+ broadcast();void persistSnapshot();
 }
 function seaRoute(from:number,to:number):number[]{
  const starts=neighbors(from).filter(i=>tiles[i]!.terrain==='water');
@@ -431,6 +419,17 @@ function command(client: Client, raw: string) {
   if (!client.joined) return;
   const player = players.get(client.id); if (!player) return;
   if(message.type==='chunks'&&Array.isArray(message.chunks)){for(const item of message.chunks.slice(0,36))if(item&&Number.isInteger(item.x)&&Number.isInteger(item.y))sendChunk(client,item.x,item.y);return;}
+  if(message.type==='spawn'){
+    if(matchPhase!=='spawning'){send(client.socket,{type:'error',text:'Spawn selection is not open yet.'});return;}
+    if(player.home>=0){send(client.socket,{type:'error',text:'You have already placed your starting territory.'});return;}
+    if(!Number.isInteger(message.tile)||!spawn(player,Number(message.tile))){send(client.socket,{type:'error',text:'Choose an open land location with room for the full starting territory.'});return;}
+    notify('🏁 '+player.name+' placed a starting territory.');
+    broadcast();maybeFinishSpawnPhase();void persistSnapshot();return;
+  }
+  if(matchPhase!=='playing'){
+    if(message.type==='ping')send(client.socket,{type:'pong',time:Date.now()});
+    return;
+  }
   if(message.type==='workers'){const now=Date.now();if(now-client.lastAction<140)return;client.lastAction=now;player.workerRatio=Math.max(0,Math.min(100,Math.floor(Number(message.ratio)||0)));broadcast();return;}
   const now = Date.now(); if (now - client.lastAction < 180) return; client.lastAction = now;
   if (message.type === 'recruit') {
@@ -518,6 +517,7 @@ http.on('upgrade', async (req,socket,head) => {
             players.delete(id);
             for (let i=0;i<tiles.length;i++) if (tiles[i]!.owner===id) { tiles[i]!.owner=null;tiles[i]!.troops=0;tiles[i]!.buildings=[];markTile(i); }
             if (player.connected) notify('↘ ' + player.name + ' left the frontier.');
+            if(matchPhase==='spawning')maybeFinishSpawnPhase();
             checkVictory(); broadcast(); void persistSnapshot();
           }
         }
@@ -528,10 +528,23 @@ http.on('upgrade', async (req,socket,head) => {
 });
 async function boot(){
  await restoreSnapshot();
- if(!tiles.length)freshWorld(true);
+ if(!tiles.length||!restoredPhaseSnapshot)freshWorld(true);
  else{for(const player of players.values()){player.connected=false;player.spawnPreference=player.spawnPreference||'auto';player.workerRatio=Number.isFinite(player.workerRatio)?player.workerRatio:30;player.territory=player.territory||0;player.troopsTotal=player.troopsTotal||0;player.troopMax=player.troopMax||0;}roundPlayerCount=players.size;}
- setInterval(advanceExpansionFronts,150);
  setInterval(()=>{
+  const now=Date.now();
+  if(matchPhase==='countdown'&&countdownEndsAt>0&&now>=countdownEndsAt){
+   matchPhase='spawning';spawnEndsAt=now+30000;
+   notify('🧭 Countdown complete. Choose your starting territory on the map!');
+   broadcast();void persistSnapshot();
+  }else if(matchPhase==='spawning'&&spawnEndsAt>0&&now>=spawnEndsAt){
+   for(const player of players.values())if(player.connected&&player.home<0)spawn(player);
+   matchPhase='playing';spawnEndsAt=0;notify('🌎 Starting phase is over. The match is live!');
+   broadcast();void persistSnapshot();
+  }
+ },250);
+ setInterval(()=>{if(matchPhase!=='playing')return;advanceExpansionFronts();},150);
+ setInterval(()=>{
+  if(matchPhase!=='playing')return;
   tick++;
   const summary=new Map<string,{land:number;troops:number;cityLevels:number;farms:number;income:number;home:number}>();
   for(const player of players.values())summary.set(player.id,{land:0,troops:0,cityLevels:0,farms:0,income:0,home:-1});
