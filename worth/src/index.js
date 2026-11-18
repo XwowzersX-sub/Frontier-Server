@@ -101,6 +101,7 @@ function queueClient(client, request) {
   const mode = validMode(request.mode);
   client.loadout = safeLoadout(request.loadout);
   client.upgrades = safeUpgrades(request.upgrades);
+  client.additionPoints = clamp(Math.floor(Number(request.additionPoints) || 0), 0, 1000);
   client.queueKey = queueKey(map, mode);
   let q = queues.get(client.queueKey) || [];
   q = q.filter(item => item.socket.readyState === WebSocket.OPEN && !item.roomId);
@@ -133,6 +134,7 @@ function newPlayer(client, index) {
     previousKeys: new Set(),
     score: 0,
     roundWins: 0,
+    additionPoints: client.additionPoints || 0,
     zoneHold: 0,
     lastSnapshot: 0,
     upgrades: client.upgrades || safeUpgrades({}),
@@ -184,7 +186,7 @@ async function saveMatchResult(room, winnerId) {
     const won = p.id === winnerId;
     const { data, error: readError } = await adminClient
       .from('worth_player_data')
-      .select('nickname,credits,match_wins,match_losses,round_wins,upgrades,loadout,contracts')
+      .select('nickname,credits,match_wins,match_losses,round_wins,addition_points,upgrades,loadout,contracts')
       .eq('user_id', p.userId).maybeSingle();
     if (readError) { console.error('WORTH progress read failed:', readError.message); return; }
     const current = data || {};
@@ -196,6 +198,7 @@ async function saveMatchResult(room, winnerId) {
       match_wins: (Number(current.match_wins) || 0) + (won ? 1 : 0),
       match_losses: (Number(current.match_losses) || 0) + (won ? 0 : 1),
       round_wins: (Number(current.round_wins) || 0) + p.roundWins,
+      addition_points: p.additionPoints,
       upgrades: p.upgrades,
       loadout: p.loadout,
       contracts: current.contracts || {},
@@ -213,11 +216,13 @@ function endRound(room, winner) {
   winner.roundWins += 1;
   const [a, b] = room.players;
   for (const p of room.players) {
+    if (room.mode === 'addition' && p.id !== winner.id) p.additionPoints += 3;
     send(p.client, {
       type: 'roundEnd',
       winner: p.id === winner.id ? 'self' : 'opponent',
       selfWins: p.roundWins,
       opponentWins: room.players.find(other => other.id !== p.id).roundWins,
+      additionPoints: p.additionPoints,
       round: room.round
     });
   }
@@ -337,6 +342,16 @@ async function handleMessage(client, raw) {
     return;
   }
   if (msg.type === 'cancelQueue') { removeFromQueue(client); return; }
+  if (msg.type === 'profileUpdate') {
+    const room = rooms.get(client.roomId);
+    const p = room?.players.find(q => q.client === client);
+    if (p && room.mode === 'addition') {
+      p.upgrades = safeUpgrades(msg.upgrades);
+      p.loadout = safeLoadout(msg.loadout);
+      p.additionPoints = clamp(Math.floor(Number(msg.additionPoints) || 0), 0, 1000);
+    }
+    return;
+  }
   if (msg.type === 'input') {
     const room = rooms.get(client.roomId);
     const p = room?.players.find(q => q.client === client);
