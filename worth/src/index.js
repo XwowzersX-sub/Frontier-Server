@@ -289,7 +289,8 @@ function tickRoom(room, dt, now) {
     return;
   }
   // Focus mode is shared: when either competitor uses the head camera, the whole arena slows evenly.
-  const simulationDt = dt * (room.players.some(p => p.input.aim) ? 0.38 : 1);
+  const timeScale = room.players.some(p => p.input.aim) ? 0.38 : 1;
+  const simulationDt = dt * timeScale;
   for (const p of room.players) updatePlayer(p, simulationDt);
   const [a, b] = room.players;
   const inA = Math.hypot(a.x, a.z) < 2.7;
@@ -310,6 +311,7 @@ function tickRoom(room, dt, now) {
       const opponent = room.players.find(other => other.id !== p.id);
       send(p.client, {
         type: 'snapshot',
+        timeScale,
         selfId: p.id,
         map: room.map,
         players: room.players.map(q => ({ id: q.id, name: q.name, x: q.x, y: q.y, z: q.z, yaw: q.yaw })),
