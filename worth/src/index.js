@@ -345,10 +345,12 @@ async function handleMessage(client, raw) {
   if (msg.type === 'profileUpdate') {
     const room = rooms.get(client.roomId);
     const p = room?.players.find(q => q.client === client);
-    if (p && room.mode === 'addition') {
-      p.upgrades = safeUpgrades(msg.upgrades);
+    if (p) {
       p.loadout = safeLoadout(msg.loadout);
-      p.additionPoints = clamp(Math.floor(Number(msg.additionPoints) || 0), 0, 1000);
+      if (room.mode === 'addition') {
+        p.upgrades = safeUpgrades(msg.upgrades);
+        p.additionPoints = clamp(Math.floor(Number(msg.additionPoints) || 0), 0, 1000);
+      }
     }
     return;
   }
