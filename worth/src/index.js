@@ -130,7 +130,7 @@ function newPlayer(client, index) {
     vx: 0, vy: 0, vz: 0,
     yaw: index === 0 ? Math.PI / 4 : -3 * Math.PI / 4,
     onGround: true,
-    input: { keys: [], yaw: 0, roll: false, crouch: false },
+    input: { keys: [], yaw: 0, roll: false, crouch: false, aim: false },
     previousKeys: new Set(),
     score: 0,
     roundWins: 0,
@@ -288,14 +288,16 @@ function tickRoom(room, dt, now) {
     if (room.phase === 'roundEnd' && now >= room.resetAt) resetRound(room);
     return;
   }
-  for (const p of room.players) updatePlayer(p, dt);
+  // Focus mode is shared: when either competitor uses the head camera, the whole arena slows evenly.
+  const simulationDt = dt * (room.players.some(p => p.input.aim) ? 0.38 : 1);
+  for (const p of room.players) updatePlayer(p, simulationDt);
   const [a, b] = room.players;
   const inA = Math.hypot(a.x, a.z) < 2.7;
   const inB = Math.hypot(b.x, b.z) < 2.7;
-  if (inA && !inB) { a.zoneHold += dt * (1 + a.upgrades.zoneControl * .06); b.zoneHold = Math.max(0, b.zoneHold - dt * .5); room.zoneOwner = a.id; }
-  else if (inB && !inA) { b.zoneHold += dt * (1 + b.upgrades.zoneControl * .06); a.zoneHold = Math.max(0, a.zoneHold - dt * .5); room.zoneOwner = b.id; }
-  else if (inA && inB) { a.zoneHold = Math.max(0, a.zoneHold - dt * .8); b.zoneHold = Math.max(0, b.zoneHold - dt * .8); room.zoneOwner = 'contested'; }
-  else { a.zoneHold = Math.max(0, a.zoneHold - dt * .2); b.zoneHold = Math.max(0, b.zoneHold - dt * .2); room.zoneOwner = null; }
+  if (inA && !inB) { a.zoneHold += simulationDt * (1 + a.upgrades.zoneControl * .06); b.zoneHold = Math.max(0, b.zoneHold - simulationDt * .5); room.zoneOwner = a.id; }
+  else if (inB && !inA) { b.zoneHold += simulationDt * (1 + b.upgrades.zoneControl * .06); a.zoneHold = Math.max(0, a.zoneHold - simulationDt * .5); room.zoneOwner = b.id; }
+  else if (inA && inB) { a.zoneHold = Math.max(0, a.zoneHold - simulationDt * .8); b.zoneHold = Math.max(0, b.zoneHold - simulationDt * .8); room.zoneOwner = 'contested'; }
+  else { a.zoneHold = Math.max(0, a.zoneHold - simulationDt * .2); b.zoneHold = Math.max(0, b.zoneHold - simulationDt * .2); room.zoneOwner = null; }
   for (const p of room.players) {
     if (p.zoneHold >= POINT_SECONDS) {
       p.zoneHold = 0; p.score += 1;
@@ -367,6 +369,7 @@ async function handleMessage(client, raw) {
     p.yaw = p.input.yaw;
     p.input.roll = !!msg.roll;
     p.input.crouch = !!msg.crouch;
+    p.input.aim = !!msg.aim;
     p.input.rollX = Math.sin(p.yaw);
     p.input.rollZ = -Math.cos(p.yaw);
   }
